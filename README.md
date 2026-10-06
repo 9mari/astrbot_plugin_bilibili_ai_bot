@@ -2,7 +2,7 @@
 
 B站 AI Bot 插件 for [AstrBot](https://github.com/AstrBotDevs/AstrBot) — 让你的 AI 角色在 B 站评论区”活”起来。
 
-内部模块正在采用渐进式统一事件与动作框架，设计边界和迁移顺序见 [ARCHITECTURE.md](ARCHITECTURE.md)。现有功能与配置会继续兼容，不进行一次性重写。
+内部模块正在采用渐进式统一事件与动作框架。现有功能与配置会继续兼容，不进行一次性重写。
 
 ## ✨ 功能
 
