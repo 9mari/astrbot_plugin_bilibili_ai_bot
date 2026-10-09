@@ -135,3 +135,5 @@ DEFAULT_DYNAMIC_TOPICS = [
     "记录一个简短且能让人读懂的自我观察，不写鸡汤",
     "如果当前时段确实影响心情，就自然说一句；否则完全不必提时间",
 ]
+
+OWNER_RECOMMEND_LOG_FILE = os.path.join(DATA_DIR, "owner_recommend_log.json")

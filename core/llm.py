@@ -8,6 +8,76 @@ from astrbot.api import logger
 class LLMMixin:
     """封装 AstrBot LLM 调用。"""
 
+    async def _summary_llm_call(self, prompt, **kwargs):
+        return await self._task_llm_call("SUMMARY", prompt, **kwargs)
+
+    async def _generation_llm_call(self, prompt, **kwargs):
+        return await self._task_llm_call("GENERATION", prompt, **kwargs)
+
+    def _task_llm_circuit(self, purpose):
+        circuits = getattr(self, "_task_llm_circuits", None)
+        if circuits is None:
+            circuits = self._task_llm_circuits = {}
+        if purpose not in circuits:
+            circuits[purpose] = LLMMixin()
+        circuit = circuits[purpose]
+        circuit.config = self.config
+        return circuit
+
+    async def _task_llm_call(self, purpose, prompt, system_prompt="", max_tokens=600):
+        """Separate factual summaries from persona writing; blank settings inherit chat."""
+        from .network import openai_proxy_kwargs
+        prefix = str(purpose).upper()
+        provider = str(self.config.get(f"{prefix}_PROVIDER_ID", "") or "").strip()
+        api_key = str(self.config.get(f"{prefix}_API_KEY", "") or "").strip()
+        model = str(self.config.get(f"{prefix}_MODEL", "") or "").strip()
+        if provider and provider.lower() != "default":
+            return await self._llm_call(prompt, system_prompt=system_prompt,
+                                        max_tokens=max_tokens, provider_id=provider, _circuit=self._task_llm_circuit(prefix))
+        if not api_key:
+            return await self._llm_call(prompt, system_prompt=system_prompt,
+                                        max_tokens=max_tokens)
+        if not model:
+            self._last_llm_error = f"{prefix} 独立 API 未填写模型名"
+            logger.warning(f"[BiliBot] {self._last_llm_error}")
+            return None
+        circuit = self._task_llm_circuit(prefix)
+        mode = await circuit._enter_llm_circuit()
+        if mode is None:
+            self._last_llm_error = getattr(circuit, "_last_llm_error", "模型暂不可用")
+            return None
+        try:
+            from openai import AsyncOpenAI
+            base = self._normalize_openai_base_url(
+                self.config.get(f"{prefix}_API_BASE", "") or "https://api.openai.com/v1"
+            )
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+            # A short-lived owned client also handles configuration changes safely.
+            async with AsyncOpenAI(api_key=api_key, base_url=base, timeout=90,
+                                   max_retries=0, **openai_proxy_kwargs(self.config)) as client:
+                response = await client.chat.completions.create(
+                    model=model, messages=messages, max_tokens=max_tokens
+                )
+            text = (response.choices[0].message.content or "").strip() if response.choices else ""
+            if not text:
+                raise ValueError("模型返回空内容")
+            self._last_llm_error = ""
+            await circuit._record_llm_success(mode)
+            return text
+        except asyncio.CancelledError:
+            if mode == "probe":
+                await circuit._release_llm_probe()
+            raise
+        except Exception as exc:
+            # API credentials or credential-bearing endpoints must not reach logs.
+            self._last_llm_error = f"{prefix} 独立 API 请求失败（{type(exc).__name__}）"
+            logger.warning(f"[BiliBot] {self._last_llm_error}")
+            await circuit._record_llm_failure(mode, self._last_llm_error)
+            return None
+
     def _llm_circuit_settings(self):
         """Return the failure threshold and cooldown without trusting config types."""
         try:
@@ -151,10 +221,22 @@ class LLMMixin:
                 logger.debug(f"[BiliBot] 读取可用聊天模型列表失败：{exc}")
         return ""
 
-    async def _llm_call(self, prompt, system_prompt="", max_tokens=300, provider_id=None):
+    async def _release_llm_probe(self):
+        """Release a half-open probe slot without recording success or failure.
+
+        Used when a probe call is cancelled: the circuit stays open for its
+        remaining cooldown, but the next call is allowed to probe again instead
+        of being skipped forever.
+        """
+        async with self._llm_circuit_lock_obj():
+            self._llm_circuit_half_open = False
+
+    async def _llm_call(self, prompt, system_prompt="", max_tokens=300, provider_id=None, *, _circuit=None):
         self._last_llm_error = ""
-        circuit_mode = await self._enter_llm_circuit()
+        circuit = _circuit if _circuit is not None else self
+        circuit_mode = await circuit._enter_llm_circuit()
         if circuit_mode is None:
+            self._last_llm_error = getattr(circuit, "_last_llm_error", "模型暂不可用")
             return None
         try:
             pid = self._resolve_chat_provider_id(provider_id)
@@ -162,7 +244,7 @@ class LLMMixin:
                 reason = "未找到可用的默认对话模型"
                 self._last_llm_error = reason
                 logger.error(f"[BiliBot] LLM 调用失败：{reason}，请检查 AstrBot 的默认聊天模型配置")
-                await self._record_llm_failure(circuit_mode, reason)
+                await circuit._record_llm_failure(circuit_mode, reason)
                 return None
             # 人设走真正的 system role：① 增强人设遵循 ② 让人设成为稳定前缀，命中提示词缓存
             kwargs = {"prompt": prompt, "max_tokens": max_tokens, "chat_provider_id": pid}
@@ -174,14 +256,20 @@ class LLMMixin:
                 reason = "模型返回空内容"
                 self._last_llm_error = reason
                 logger.error(f"[BiliBot] LLM 调用失败：{reason}")
-                await self._record_llm_failure(circuit_mode, reason)
+                await circuit._record_llm_failure(circuit_mode, reason)
                 return None
-            await self._record_llm_success(circuit_mode)
+            await circuit._record_llm_success(circuit_mode)
             return text
+        except asyncio.CancelledError:
+            # 被取消的探测既不算成功也不算失败；复位半开标志，
+            # 否则后续所有调用会被永久跳过（审计发现 F4）。
+            if circuit_mode == "probe":
+                await circuit._release_llm_probe()
+            raise
         except Exception as e:
             self._last_llm_error = f"模型请求异常：{e}"[:240]
             logger.error(f"[BiliBot] LLM 调用失败: {e}")
-            await self._record_llm_failure(circuit_mode, str(e))
+            await circuit._record_llm_failure(circuit_mode, str(e))
             return None
 
     async def _get_system_prompt(self):

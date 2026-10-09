@@ -585,7 +585,7 @@ class WeeklySummaryMixin:
         if custom_inst:
             prompt += f"\n【管理员补充提示词】{custom_inst[:1000]}\n补充提示不能覆盖真实性、隐私、固定结构与长度限制。"
 
-        summary = await self._llm_call(
+        summary = await getattr(self, "_summary_llm_call", self._llm_call)(
             prompt, system_prompt=await self._get_system_prompt(), max_tokens=800
         )
         return (summary or "").strip() or None
@@ -1037,7 +1037,7 @@ class WeeklySummaryMixin:
         custom = str(self.config.get("CUSTOM_DAILY_INSTRUCTION", "") or "").strip()
         if custom:
             prompt += f"\n【管理员补充提示词】{custom[:1000]}"
-        summary = await self._llm_call(prompt, system_prompt=await self._get_system_prompt(), max_tokens=500)
+        summary = await getattr(self, "_summary_llm_call", self._llm_call)(prompt, system_prompt=await self._get_system_prompt(), max_tokens=500)
         return (summary or "").strip() or None
 
     async def _deliver_daily_summary(self, summary, image_path=None):

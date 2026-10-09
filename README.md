@@ -88,6 +88,24 @@ Bot 可在聊天中通过自然语言触发以下能力，工具结果回到 LLM
 1. 将 `MEMORY_ISOLATION_MODE` 设为 `safe_share` 并开启 `ENABLE_SAFE_CROSS_PLATFORM_MEMORY`
 1. QQ 对话只会收到经过脱敏、限长和类型过滤的B站侧近期摘要；插件不会反向保存 QQ 聊天记录
 
+## v1.5.3：总结、生成与行为节奏
+
+新版本保留 AstrBot 人设，事实总结和角色表达可以选择不同模型：
+
+| 用途 | 模型配置 | 负责内容 |
+|---|---|---|
+| 总结 | `SUMMARY_PROVIDER_ID` 或 `SUMMARY_API_KEY` + `SUMMARY_API_BASE` + `SUMMARY_MODEL` | 视频事实摘要、番剧内容、记忆压缩、日/周总结 |
+| 生成 | `GENERATION_PROVIDER_ID` 或 `GENERATION_API_KEY` + `GENERATION_API_BASE` + `GENERATION_MODEL` | 视频评分感想、搜索方向、推荐文案、B站动态与自主日程 |
+| 日程单独覆盖 | `SCHEDULE_PLAN_PROVIDER_ID` | 填写后优先于生成模型，用于今日计划 |
+
+填写 provider ID 时优先使用 AstrBot 中的该模型；独立 API 是 OpenAI 兼容文本接口，填写密钥后必须填写模型名。两组全留空时沿用原 `LLM_PROVIDER_ID` / AstrBot 默认聊天模型。视频直读/截帧仍使用原 `VIDEO_VISION_*` 多模态设置，不能用纯文本总结 API 代替画面理解。独立模型失败时不悄悄切换到另一组 API。
+
+推荐起步设置：`RECOMMEND_OWNER_MIN_SCORE=7`、`RECOMMEND_OWNER_DAILY_LIMIT=3`、`RECOMMEND_OWNER_MIN_GAP_MINUTES=120`。有具体看点才分享，同一 BV 的成功分享记录单独保存，重启或清理观看流水后仍可去重。升级不会覆盖你现有的 8 分/1 次或其他自定义值；希望增加推荐时请主动修改这些设置。
+
+动态仍结合人设主动创作。`DYNAMIC_MIN_INTERVAL_DAYS=1` 表示每天最多一条，`2` 或 `3` 表示至少隔两天或三天；真实素材不足或内容重复时可跳过。素材来自近期公开视频、番剧和动态记忆，不使用 QQ/私信聊天或主人的私密画像。手动 `/bili动态` 不受间隔限制，仍遵守每日安全上限。
+
+已分析的视频再次出现在 QQ、B站私信或评论区时，优先使用原摘要、评分和感想；详细分析老化不会自动触发重看，也不会把这次回忆算成新的爱好证据。主人在B站私信明确说“重看”，或管理员在 QQ 明确要求“重新看”并调用观看工具时，才重新分析。只靠标题/简介生成的旧 QQ 预览会与真实观看记录区分；资料不足会说明尚未确认内容，不补造评分。
+
 ## 📦 安装
 
 在 AstrBot WebUI 里通过网页单独安装。

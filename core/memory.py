@@ -237,6 +237,10 @@ class MemoryMixin:
 
         def add(bvid, item=None, source="legacy"):
             data = item if isinstance(item, dict) else {}
+            if data.get("content_analyzed") is False or (
+                data.get("source") == "group_share" and not data.get("content_analyzed")
+            ):
+                return
             key = str(bvid or data.get("bvid") or "").strip()
             if len(key) < 4 or key[:2].lower() != "bv":
                 return
@@ -344,10 +348,13 @@ class MemoryMixin:
         layered = getattr(self, "layered_runtime", None)
         if layered is not None and layered.is_open:
             try:
-                return await layered.seen_videos.get(key)
+                record = await layered.seen_videos.get(key)
+                if record:
+                    return record
             except Exception as exc:
                 logger.warning(f"[BiliBot] 读取视频观看痕迹失败: {exc}")
-        return None
+        return next((item for item in reversed(self._legacy_seen_video_records())
+                     if item.get("bvid") == key), None)
 
     async def _mark_video_seen(
         self, bvid, info=None, source="watch", *, increment=True
@@ -892,7 +899,7 @@ class MemoryMixin:
             f"{old_texts[:4000]}\n\n直接输出总结，不加前缀。"
         )
         try:
-            summary = await self._llm_call(prompt, max_tokens=300)
+            summary = await getattr(self, "_summary_llm_call", self._llm_call)(prompt, max_tokens=300)
             if not summary:
                 cooldowns[cooldown_key] = _time.time()
                 self._compress_cooldowns = cooldowns
@@ -948,7 +955,7 @@ class MemoryMixin:
         old_texts = "\n".join([m["text"] for m in old])
         prompt = f"请用80字以内总结以下同一评论线下的对话要点，保留关键信息和话题走向：\n\n{old_texts[:3000]}\n\n直接输出总结，不加前缀。"
         try:
-            summary = await self._llm_call(prompt, max_tokens=200)
+            summary = await getattr(self, "_summary_llm_call", self._llm_call)(prompt, max_tokens=200)
             if not summary:
                 cooldowns[cooldown_key] = _time.time()
                 self._compress_cooldowns = cooldowns
@@ -1019,7 +1026,7 @@ class MemoryMixin:
             f'历史：\n{old_texts[:3000]}\n\nJSON格式：{{"summary":"","tags":[],"user_facts":[]}}'
         )
         try:
-            text = await self._llm_call(prompt, max_tokens=400)
+            text = await getattr(self, "_summary_llm_call", self._llm_call)(prompt, max_tokens=400)
             if not text:
                 cooldowns[cooldown_key] = _time.time()
                 self._compress_cooldowns = cooldowns

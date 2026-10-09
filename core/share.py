@@ -7,7 +7,7 @@ import re
 import shutil
 import time
 from datetime import datetime
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse, urljoin
 
 import aiohttp
 from .network import plugin_http_session
@@ -163,19 +163,53 @@ class ShareMixin:
             pass
         return None
 
-    async def _resolve_share_url(self, url):
+    @staticmethod
+    def _is_allowed_share_host(url):
+        """严格主机校验：仅允许 B站官方域名，杜绝子串匹配绕过。
+
+        旧实现用 ``host in url.lower()`` 判断，``http://127.0.0.1/b23.tv/x``
+        或 ``b23.tv.evil.com`` 都会通过。这里改为对 ``urlparse`` 出的
+        hostname 做精确等值/后缀比较。
+        """
         try:
-            async with plugin_http_session(self.config) as s:
-                async with s.get(
-                    url,
-                    headers={**self._headers(), "Accept": "text/html,application/xhtml+xml"},
-                    allow_redirects=True,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as r:
-                    return str(r.url)
-        except Exception as e:
-            logger.debug(f"[BiliBot] B站短链展开失败: {url} {e}")
-            return url
+            parsed = urlparse(url)
+            if parsed.scheme.lower() not in {"http", "https"} or parsed.username or parsed.password or parsed.port not in {None, 80, 443}:
+                return False
+            hostname = (parsed.hostname or "").lower().rstrip(".")
+        except Exception:
+            return False
+        if hostname in ("b23.tv", "bili2233.cn", "bilibili.com"):
+            return True
+        return hostname.endswith(".bilibili.com")
+
+    async def _resolve_share_url(self, url):
+        # Check every hop BEFORE making the next request; never send login cookies.
+        original = url
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) BiliBot",
+            "Referer": "https://www.bilibili.com",
+            "Accept": "text/html,application/xhtml+xml",
+        }
+        try:
+            async with plugin_http_session(self.config) as session:
+                for _ in range(5):
+                    if not self._is_allowed_share_host(url):
+                        return original
+                    async with session.get(url, headers=headers, allow_redirects=False,
+                                           timeout=aiohttp.ClientTimeout(total=10)) as response:
+                        current = str(response.url)
+                        if not self._is_allowed_share_host(current):
+                            return original
+                        if getattr(response, "status", 200) not in {301, 302, 303, 307, 308}:
+                            return current
+                        location = response.headers.get("Location", "")
+                        target = urljoin(current, location)
+                        if not location or not self._is_allowed_share_host(target):
+                            return original
+                        url = target
+        except Exception as exc:
+            logger.debug(f"[BiliBot] B站短链展开失败: {type(exc).__name__}")
+        return original
 
     async def _extract_bili_share_target(self, text):
         blob = self._normalized_share_blob(text)
@@ -193,14 +227,18 @@ class ShareMixin:
                 if clean not in urls:
                     urls.append(clean)
         for url in urls:
-            lower = url.lower()
-            if not any(host in lower for host in ("bilibili.com", "b23.tv", "bili2233.cn")):
+            # 严格主机校验：伪造路径（如 127.0.0.1/b23.tv/x）或仿冒域名
+            # （b23.tv.evil.com）一律不请求，避免 Cookie 外带与 SSRF。
+            if not self._is_allowed_share_host(url):
                 continue
             direct = self._target_from_url(url)
             if direct:
                 return direct
-            if any(host in lower for host in ("b23.tv", "bili2233.cn")):
+            if any(host in url.lower() for host in ("b23.tv", "bili2233.cn")):
                 resolved = await self._resolve_share_url(url)
+                # 重定向后的最终地址也要过主机校验，防止短链跳到站外。
+                if not self._is_allowed_share_host(resolved):
+                    continue
                 target = self._target_from_url(resolved)
                 if target:
                     target["url"] = resolved
@@ -234,33 +272,22 @@ class ShareMixin:
         return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
     async def _summarize_shared_video(self, info):
-        bvid = info.get("bvid", "")
-        vc = self._load_json(VIDEO_MEMORY_FILE, {})
-        cached = vc.get(bvid, {}) if bvid else {}
-        if cached.get("analysis") and not self._analysis_has_subtitle_mismatch(
-            cached.get("analysis", "")
-        ):
-            return cached["analysis"]
-        if cached.get("analysis"):
-            logger.warning(f"[BiliBot] 分享解析忽略字幕错配缓存: {bvid}")
+        bvid = str(info.get("bvid", "") or "")
+        cached = self._cached_video_memory(bvid) if bvid else None
+        if cached:
+            content = cached.get("analysis") or cached.get("summary", "")
+            review = cached.get("review", "")
+            rating = f"\n当时评分：{cached.get('score')}/10；理由：{cached.get('score_reason', '')}" if cached.get("score") is not None else ""
+            faded = "（细节已淡忘，仅保留摘要）" if cached.get("memory_stage") == "faded" else ""
+            return "【从观看记忆读取】" + faded + "\n" + content + rating + (f"\n当时的感想：{review}" if review else "")
         if not self.config.get("BILI_SHARE_PARSE_ANALYZE", True):
             return (info.get("desc") or "这个视频没有简介。")[:220]
-        result = await self._analyze_video_text(info)
-        summary = (result or info.get("desc") or "暂时没能概括出内容。")[:500]
         if bvid:
-            vc[bvid] = {
-                "bvid": bvid,
-                "title": info.get("title", ""),
-                "desc": (info.get("desc") or "")[:200],
-                "owner_name": info.get("owner_name", ""),
-                "owner_mid": str(info.get("owner_mid", "")),
-                "tname": info.get("tname", ""),
-                "analysis": summary,
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "source": "group_share",
-            }
-            self._save_json(VIDEO_MEMORY_FILE, vc)
-        return summary
+            result = await self._watch_video_and_save_memory(bvid, memory_source="qq_share")
+            if result.get("ok"):
+                return result.get("message", "")
+            return "暂未完成视频分析：" + result.get("message", "内容获取失败")
+        return "仅有视频简介，尚未确认完整内容：" + (info.get("desc") or "暂无简介")[:220]
 
     def _share_video_intro(self, info):
         intro = (info.get("desc") or "这个视频没有简介。").strip()
@@ -671,7 +698,8 @@ class ShareMixin:
                 yield event.plain_result("后面还有内容，我先按配置发到这里；想多发可以调大 BILI_SHARE_PARSE_MAX_SEGMENTS。")
         finally:
             # 协议端可能在 yield 之后才 realpath/copy，发送缓存交给全局清理按 20 分钟窗口处理。
-            cleanup = list(raw_send_paths)
+            # cleanup 必须同时包含发送副本 send_paths，否则 share_send_* 目录会永久残留。
+            cleanup = list(dict.fromkeys(list(raw_send_paths) + list(send_paths)))
             if video_path and video_path not in cleanup:
                 cleanup.append(video_path)
             if cleanup:

@@ -1,5 +1,5 @@
 """
-AstrBot Plugin - Bilibili Bot 1.5.2
+AstrBot Plugin - Bilibili Bot 1.5.3
 自动回复评论、好感度、记忆、心情、用户画像、主动视频、动态发布。
 拆分版本：核心逻辑分布在 core/ 下的 Mixin 模块中。
 """
@@ -34,7 +34,7 @@ _astrbot_site_packages = os.path.join(os.path.expanduser("~"), ".astrbot", "data
 if os.path.isdir(_astrbot_site_packages) and _astrbot_site_packages not in sys.path:
     sys.path.insert(0, _astrbot_site_packages)
 
-@register("astrbot_plugin_bilibili_ai_bot","chenluQwQ","B站 AI Bot — 自动回复评论、好感度、记忆、心情、用户画像、主动视频、动态发布、LLM工具调用","1.5.2","https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot")
+@register("astrbot_plugin_bilibili_ai_bot","chenluQwQ","B站 AI Bot — 自动回复评论、好感度、记忆、心情、用户画像、主动视频、动态发布、LLM工具调用","1.5.3","https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot")
 class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, AffectionMixin, PersonalityMixin, BilibiliAPIMixin, BangumiMixin, WebSearchMixin, VideoMixin, ReplyMixin, ProactiveMixin, DynamicMixin, ScheduleMixin, WeeklySummaryMixin, ShareMixin, PrivateMessageMixin, LiveDanmakuMixin):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -479,6 +479,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         ):
             yield result
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili登录")
     async def cmd_login(self, event: AstrMessageEvent):
         qr_url, qrcode_key = await self._qr_login_generate()
@@ -498,6 +499,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         with open(qr_path, "wb") as f:
             f.write(buf.getvalue())
         yield event.chain_result([Plain("📱 请用B站APP扫描下方二维码：\n扫码后发送 /bili确认"), Image.fromFileSystem(qr_path)])
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili确认")
     async def cmd_login_confirm(self, event: AstrMessageEvent):
         if not self._login_qrcode_key:
@@ -583,7 +585,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         runtime_priorities = runtime_status.get("event_priorities", {})
         runtime_actions = runtime_status.get("action_states", {})
         lines = [
-            "📺 BiliBot 1.5.2 状态","━━━━━━━━━━━━",f"🍪 {info}",
+            "📺 BiliBot 1.5.3 状态","━━━━━━━━━━━━",f"🍪 {info}",
             f"{'🟢 运行中' if self._running else '🔴 未运行'}",
             f"🧠 记忆:{mc}条 | 💎永久:{pmc}条 | 👤档案:{pc}个",
             f"   📊 今日:{sum(1 for m in self._memory if m.get('level')=='today')} | 近期:{sum(1 for m in self._memory if m.get('level')=='recent')} | 长期:{sum(1 for m in self._memory if m.get('level')=='long_term')} | 老化:{sum(1 for m in self._memory if m.get('aged'))}",
@@ -615,6 +617,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             f"主动视频直读/截帧:{'✅' if feature_status['proactive_video_media'] else '❌'} 纯文本回退:{'✅' if feature_status['proactive_video_fallback_text'] else '❌'}",
         ]
         yield event.plain_result("\n".join(lines))
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili直播")
     async def cmd_live_danmaku(self, event: AstrMessageEvent):
         """管理 BiliBot 本体进入指定直播间后的弹幕互动。"""
@@ -727,6 +730,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             yield event.plain_result("\n".join(lines[mid_idx:]))
         else:
             yield event.plain_result(text)
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili启动")
     async def cmd_start(self, event: AstrMessageEvent):
         if self._running:
@@ -737,6 +741,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             return
         await self._start_bot()
         yield event.plain_result("🚀 已启动！")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili停止")
     async def cmd_stop(self, event: AstrMessageEvent):
         if not self._running:
@@ -744,6 +749,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             return
         await self._stop_bot()
         yield event.plain_result("⏹️ 已停止")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili主动")
     async def cmd_proactive(self, event: AstrMessageEvent):
         if not self._has_cookie():
@@ -808,6 +814,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             "评论": "PROACTIVE_COMMENT",
         }
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili开关")
     async def cmd_toggle(self, event: AstrMessageEvent):
         parts = event.message_str.strip().split(maxsplit=1)
@@ -853,6 +860,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             elif cur:
                 await self._stop_live_danmaku_listener()
         yield event.plain_result(f"{name}: {'✅ 已开启' if not cur else '❌ 已关闭'}")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili刷新")
     async def cmd_refresh_cookie(self, event: AstrMessageEvent):
         yield event.plain_result("🔄 刷新中...")
@@ -918,6 +926,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         for i,r in enumerate(results,1): lines.append(f"{i}. {r[:150]+'...' if len(r)>150 else r}")
         yield event.plain_result("\n".join(lines))
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili清算")
     async def cmd_consolidation(self, event: AstrMessageEvent):
         """手动触发日终清算。"""
@@ -928,6 +937,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         except Exception as e:
             yield event.plain_result(f"❌ 清算失败: {e}")
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili周总结")
     async def cmd_weekly_summary(self, event: AstrMessageEvent):
         """手动触发周总结（生成并按配置投递）。"""
@@ -945,6 +955,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         except Exception as e:
             yield event.plain_result(f"❌ 周总结失败: {e}")
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili清理老化")
     async def cmd_cleanup_aged(self, event: AstrMessageEvent):
         """清理所有 aged=true 的长期记忆。"""
@@ -1029,6 +1040,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             imp=ps.get(uid,{}).get("impression","")
             lines.append(f"{i}. UID:{uid} | {sc}分 {LEVEL_NAMES[lv]}{' — '+imp[:20] if imp else ''}")
         yield event.plain_result("\n".join(lines))
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili拉黑")
     async def cmd_block(self, event: AstrMessageEvent):
         """手动拉黑用户。用法: /bili拉黑 <UID>"""
@@ -1048,6 +1060,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         bl[uid] = {"username":"手动拉黑","reason":"手动拉黑","time":datetime.now().strftime("%Y-%m-%d %H:%M")}
         self._save_json(os.path.join(DATA_DIR,"block_log.json"), bl)
         yield event.plain_result(f"{'✅' if success else '⚠️'} 已拉黑 UID:{uid}{'（B站API调用成功）' if success else '（B站API失败，但已加入本地黑名单）'}")
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili解黑")
     async def cmd_unblock(self, event: AstrMessageEvent):
         """解除拉黑。用法: /bili解黑 <UID>"""
@@ -1082,6 +1095,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         for uid,info in bl.items():
             lines.append(f"UID:{uid} | {info.get('reason','未知')} | {info.get('time','')}")
         yield event.plain_result("\n".join(lines))
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili清理")
     async def cmd_cleanup(self, event: AstrMessageEvent):
         """清理临时文件和过期数据。用法: /bili清理 [all]"""
@@ -1193,6 +1207,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             self._format_interest_report(lifecycle_items=lifecycle_items)
         )
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili性格编辑")
     async def cmd_personality_edit(self, event: AstrMessageEvent):
         """手动添加/编辑性格。用法:
@@ -1224,6 +1239,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         evo["version"] = evo.get("version", 0) + 1
         self._save_json(PERSONALITY_FILE, evo)
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili性格删除")
     async def cmd_personality_delete(self, event: AstrMessageEvent):
         """删除性格演化条目。用法:
@@ -1392,6 +1408,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             lines.append(f"   💛 好感{'+' if r.get('score_delta', 0) >= 0 else ''}{r.get('score_delta', 0)}")
         return "\n".join(lines)
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili永久记忆")
     async def cmd_permanent_memory(self, event: AstrMessageEvent):
         """查看/删除永久记忆。用法: /bili永久记忆 | /bili永久记忆 删除 <序号>"""
@@ -1419,6 +1436,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         lines.append("\n删除用: /bili永久记忆 删除 <序号>")
         yield event.plain_result("\n".join(lines))
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili动态")
     async def cmd_dynamic(self, event: AstrMessageEvent):
         """手动发布动态"""
@@ -1429,6 +1447,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         await self._run_dynamic(human_initiated=True)
         yield event.plain_result("📢 动态发布流程已完成，请查看日志")
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("bili看番")
     async def cmd_watch_bangumi(self, event: AstrMessageEvent):
         """手动触发看番。用法: /bili看番 [season_id]"""
@@ -1465,6 +1484,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             lines.append(f"  《{title}》已看{total}集 [{ep_str}] 最近评分:{last_score}")
         yield event.plain_result("\n".join(lines))
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("biliUMO")
     async def cmd_umo(self, event: AstrMessageEvent):
         """获取当前会话 UMO 并自动记录到周总结/恶意告警配置。"""
@@ -1501,6 +1521,15 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         if not bili_uid.isdigit():
             yield event.plain_result("⚠️ B站UID应为数字")
             return
+        owner_mid = str(self.config.get("OWNER_MID", "") or "").strip()
+        if owner_mid and bili_uid == owner_mid:
+            try:
+                is_admin = bool(event.is_admin())
+            except Exception:
+                is_admin = False
+            if not is_admin:
+                yield event.plain_result("⚠️ 绑定主人UID需要管理员权限，请联系管理员操作")
+                return
         qq_id = str(event.get_sender_id())
         bindings = self._load_json(BINDING_FILE, {})
         bindings[qq_id] = bili_uid
@@ -1550,10 +1579,18 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             if qq_id not in bindings:
                 return
             bili_uid = str(bindings[qq_id])
+            try:
+                sender_is_admin = bool(event.is_admin())
+            except Exception:
+                sender_is_admin = False
             # Current activity is a short-lived fact and is separate from history
             # sharing. It is available only to the QQ identity bound to OWNER_MID.
             owner_mid = str(self.config.get("OWNER_MID", "") or "").strip()
             if not owner_mid or bili_uid != owner_mid:
+                return
+            # 主人上下文（活动状态与跨端记忆）只允许管理员会话接收，
+            # 防止旧绑定文件或伪造绑定让普通用户读到主人侧信息。
+            if not sender_is_admin:
                 return
             if self.config.get("ENABLE_CROSS_PLATFORM_ACTIVITY_STATUS", True):
                 activity = self._cross_platform_activity_context()

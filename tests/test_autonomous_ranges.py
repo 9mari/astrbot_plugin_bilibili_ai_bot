@@ -473,12 +473,13 @@ def _check_video_cache_uses_detail_long_term_and_faded_stages():
     assert "analysis" in cache["detail"]
     assert cache["long"]["memory_stage"] == "long_term"
     assert "analysis" not in cache["long"]
-    assert "review" not in cache["long"]
+    assert cache["long"].get("review") == "详细感想"
     assert cache["long"]["summary"]
     assert cache["faded"]["memory_stage"] == "faded"
     assert set(cache["faded"]) == {
         "bvid", "title", "owner_name", "owner_mid", "tname", "summary",
         "time", "source", "memory_stage", "faded_at",
+        "score", "mood", "score_reason", "review", "analysis_basis", "content_analyzed",
     }
     assert not probe._compact_video_cache(cache)
 
@@ -623,7 +624,7 @@ class AsyncRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(probe.llm_calls, 1)
         self.assertEqual(first, second)
 
-    async def test_failed_daily_plan_retries_only_once_at_retry_slot(self):
+    async def test_failed_daily_plan_retries_respect_configured_limit(self):
         class FrozenDateTime(datetime):
             current = datetime(2026, 8, 20, 8, 5, 0)
 
@@ -632,6 +633,7 @@ class AsyncRegressionTests(unittest.IsolatedAsyncioTestCase):
                 return cls.current
 
         probe = FailingPlanProbe()
+        probe.config["AUTONOMOUS_PLAN_MAX_RETRIES"] = 1
         with patch("core.schedule_mixin.datetime", FrozenDateTime):
             first = await probe._ensure_autonomous_daily_plan()
             self.assertEqual(probe.llm_calls, 1)
@@ -651,6 +653,38 @@ class AsyncRegressionTests(unittest.IsolatedAsyncioTestCase):
             FrozenDateTime.current = datetime(2026, 8, 20, 8, 21, 0)
             await probe._ensure_autonomous_daily_plan()
             self.assertEqual(probe.llm_calls, 2)
+
+    async def test_failed_daily_plan_default_allows_two_retries(self):
+        """Issue #34: one unlucky model response must not kill the whole day."""
+        class FrozenDateTime(datetime):
+            current = datetime(2026, 8, 20, 8, 5, 0)
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current
+
+        probe = FailingPlanProbe()
+        with patch("core.schedule_mixin.datetime", FrozenDateTime):
+            first = await probe._ensure_autonomous_daily_plan()
+            self.assertEqual(first["model_attempts"], 1)
+            self.assertFalse(first["retry_exhausted"])
+
+            FrozenDateTime.current = datetime(2026, 8, 20, 8, 20, 0)
+            second = await probe._ensure_autonomous_daily_plan()
+            self.assertEqual(probe.llm_calls, 2)
+            self.assertEqual(second["model_attempts"], 2)
+            # 默认允许 2 次重试（共 3 次尝试），第二次失败仍不判死刑
+            self.assertFalse(second["retry_exhausted"])
+
+            FrozenDateTime.current = datetime(2026, 8, 20, 8, 35, 0)
+            third = await probe._ensure_autonomous_daily_plan()
+            self.assertEqual(probe.llm_calls, 3)
+            self.assertEqual(third["model_attempts"], 3)
+            self.assertTrue(third["retry_exhausted"])
+
+            FrozenDateTime.current = datetime(2026, 8, 20, 8, 50, 0)
+            await probe._ensure_autonomous_daily_plan()
+            self.assertEqual(probe.llm_calls, 3)
 
     async def test_failed_plan_does_not_invent_proactive_or_dynamic_actions(self):
         probe = FailingPlanProbe()

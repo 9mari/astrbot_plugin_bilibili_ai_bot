@@ -518,11 +518,21 @@ class PreferenceStore:
 
                 times = [float(row["occurred_at"]) for row in evidence]
                 first_seen, last_seen = min(times), max(times)
-                week_starts = self._week_starts(times)
+                totals = {name: 0.0 for name in self.POLARITIES}
+                for row in evidence:
+                    age = max(0.0, (timestamp - float(row["occurred_at"])) / 86400)
+                    totals[str(row["polarity"])] += float(row["strength"]) * (0.5 ** (age / 14.0))
+                polarity = max(
+                    totals,
+                    key=lambda name: totals[name] * self._POLARITY_WEIGHT[name],
+                )
+                dominant = totals[polarity] * self._POLARITY_WEIGHT[polarity]
+                supporting_times = [float(row["occurred_at"]) for row in evidence if str(row["polarity"]) == polarity]
+                week_starts = self._week_starts([value for value in supporting_times if value >= timestamp - 42 * 86400])
                 consecutive = self._max_consecutive_weeks(week_starts)
-                recent_count = sum(value >= timestamp - 7 * 86400 for value in times)
+                recent_count = sum(value >= timestamp - 7 * 86400 for value in supporting_times)
                 age_days = max(0.0, (timestamp - last_seen) / 86400)
-                old_stage = str(old["stage"]) if old else ""
+                old_stage = str(old["stage"]) if old and str(old["polarity"]) == polarity else ""
 
                 if age_days > 90:
                     if old:
@@ -555,14 +565,6 @@ class PreferenceStore:
                     )
                     continue
 
-                totals = {name: 0.0 for name in self.POLARITIES}
-                for row in evidence:
-                    totals[str(row["polarity"])] += float(row["strength"])
-                polarity = max(
-                    totals,
-                    key=lambda name: totals[name] * self._POLARITY_WEIGHT[name],
-                )
-                dominant = totals[polarity] * self._POLARITY_WEIGHT[polarity]
                 if stage == "stable":
                     decay = max(0.1, 1.0 - age_days / 90.0)
                     expires_at = last_seen + 90 * 86400
@@ -572,7 +574,7 @@ class PreferenceStore:
                 else:
                     decay = max(0.1, 1.0 - age_days / 7.0)
                     expires_at = last_seen + 7 * 86400
-                score = round(min(1.0, dominant / max(1, len(evidence))) * decay, 3)
+                score = round(min(1.0, dominant / max(0.001, sum(0.5 ** (max(0.0, (timestamp - float(row["occurred_at"])) / 86400) / 14.0) for row in evidence))) * decay, 3)
 
                 old_rank = self._STAGE_RANK.get(old_stage, 0)
                 new_rank = self._STAGE_RANK[stage]

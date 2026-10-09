@@ -86,6 +86,54 @@
     "default": 120,
     "hint": "冷却结束后只放行一个探测请求；成功后恢复，失败则重新冷却。建议 60-600 秒。"
   },
+  "SUMMARY_PROVIDER_ID": {
+    "description": "【总结模型】AstrBot 模型提供商 ID",
+    "type": "string",
+    "default": "",
+    "hint": "选择 AstrBot 中的 provider ID；填写后优先于独立 API，留空沿用默认聊天模型或下方独立 API。"
+  },
+  "SUMMARY_API_KEY": {
+    "description": "【总结模型】独立 API 密钥",
+    "type": "string",
+    "default": "",
+    "hint": "OpenAI 兼容接口的密钥；与另一组完全独立，留空沿用默认聊天模型。"
+  },
+  "SUMMARY_API_BASE": {
+    "description": "【总结模型】独立 API 地址",
+    "type": "string",
+    "default": "",
+    "hint": "填写 OpenAI 兼容接口根地址（通常以 /v1 结尾），留空使用 https://api.openai.com/v1。"
+  },
+  "SUMMARY_MODEL": {
+    "description": "【总结模型】独立 API 模型名",
+    "type": "string",
+    "default": "",
+    "hint": "使用独立 API 时必须填写模型名。总结用于视频内容、记忆整理和日/周总结；生成用于评分感想、推荐文案与动态。"
+  },
+  "GENERATION_PROVIDER_ID": {
+    "description": "【生成模型】AstrBot 模型提供商 ID",
+    "type": "string",
+    "default": "",
+    "hint": "选择 AstrBot 中的 provider ID；填写后优先于独立 API，留空沿用默认聊天模型或下方独立 API。"
+  },
+  "GENERATION_API_KEY": {
+    "description": "【生成模型】独立 API 密钥",
+    "type": "string",
+    "default": "",
+    "hint": "OpenAI 兼容接口的密钥；与另一组完全独立，留空沿用默认聊天模型。"
+  },
+  "GENERATION_API_BASE": {
+    "description": "【生成模型】独立 API 地址",
+    "type": "string",
+    "default": "",
+    "hint": "填写 OpenAI 兼容接口根地址（通常以 /v1 结尾），留空使用 https://api.openai.com/v1。"
+  },
+  "GENERATION_MODEL": {
+    "description": "【生成模型】独立 API 模型名",
+    "type": "string",
+    "default": "",
+    "hint": "使用独立 API 时必须填写模型名。总结用于视频内容、记忆整理和日/周总结；生成用于评分感想、推荐文案与动态。"
+  },
   "ENABLE_REPLY": {
     "description": "【功能开关】启用评论自动回复",
     "type": "bool",
@@ -536,6 +584,22 @@
     "default": 7,
     "hint": "默认汇总最近7天各分区的平均评分；同时用于搜索词决策和高分分区标题筛选。"
   },
+  "PROACTIVE_PREFERENCE_HALF_LIFE_DAYS": {
+    "description": "【主动行为】近期爱好证据半衰期（天）",
+    "type": "int",
+    "default": 7,
+    "min": 1,
+    "max": 90,
+    "hint": "新感受权重更高；7天前的信号只保留一半权重，近期厌倦可抵消旧喜好。"
+  },
+  "PROACTIVE_EXPLORATION_RATIO": {
+    "description": "【主动行为】新题材探索比例",
+    "type": "float",
+    "default": 0.3,
+    "min": 0,
+    "max": 1,
+    "hint": "默认约三成搜索/视频池候选保留探索机会；不因为题材陌生就自动拒绝。"
+  },
   "PROACTIVE_VIDEO_POOLS": {
     "description": "【主动看片·来源3】视频池/地址池（可填中文，不用记 rid/tid）",
     "type": "list",
@@ -656,18 +720,26 @@
   "RECOMMEND_OWNER_MIN_SCORE": {
     "description": "【主动行为·给主人推荐】最低个人喜好评分",
     "type": "int",
-    "default": 8,
-    "hint": "Bot 自己的观后评分达到此值、且确实想分享时才推荐，默认 8；不要求与主人的爱好相同，也不会把分享记录当成主人的喜好反馈。",
+    "default": 7,
+    "hint": "默认7分；有具体看点且想交流就可分享，不必等到惊艳或符合主人固定爱好。",
     "min": 0,
     "max": 10
   },
   "RECOMMEND_OWNER_DAILY_LIMIT": {
     "description": "【主动行为·给主人推荐】每天最多发送几次",
     "type": "int",
-    "default": 1,
-    "hint": "0=不限制；默认每天最多一次，避免频繁打扰。",
+    "default": 3,
+    "hint": "默认每天最多3个，实际有价值才发；0不限制，仍遵守推荐间隔。",
     "min": 0,
     "max": 20
+  },
+  "RECOMMEND_OWNER_MIN_GAP_MINUTES": {
+    "description": "【主动行为·给主人推荐】两次推荐至少间隔（分钟）",
+    "type": "int",
+    "default": 120,
+    "min": 0,
+    "max": 1440,
+    "hint": "默认间隔2小时；0关闭间隔。跨轮次读取实际成功发送记录，同一视频不重复推荐。"
   },
   "CUSTOM_RECOMMEND_INSTRUCTION": {
     "description": "【主动行为·给主人推荐】推荐语补充提示词",
@@ -820,6 +892,14 @@
     "hint": "防止刷屏",
     "min": 0,
     "max": 20
+  },
+  "DYNAMIC_MIN_INTERVAL_DAYS": {
+    "description": "【动态】自动动态最短间隔（天）",
+    "type": "int",
+    "default": 1,
+    "min": 1,
+    "max": 30,
+    "hint": "1表示每天最多一次，2或3表示至少隔2或3天。只在有真实素材时发布；手动请求不受此间隔限制。"
   },
   "DYNAMIC_TOPICS": {
     "description": "【动态发布】动态主题池（每行一个）",
@@ -1009,12 +1089,26 @@
     "hint": "仅在“固定时刻”模式生效，格式 HH:MM；生成窗口为计划时刻后的 15 分钟，错过后当天不再自动补生成。"
   },
   "AUTONOMOUS_PLAN_RETRY_MINUTES": {
-    "description": "【自主安排】模型失败后唯一一次重试等待（分钟）",
+    "description": "【自主安排】计划生成失败后的重试等待（分钟）",
     "type": "int",
     "default": 15,
     "min": 5,
     "max": 360,
-    "hint": "首次失败后等待这么久再尝试一次；重试再次失败或错过重试窗口，当天不再自动请求。手动重新生成不受影响。"
+    "hint": "每次失败后等待这么久再重试；重试次数由 AUTONOMOUS_PLAN_MAX_RETRIES 控制，全部失败或错过窗口，当天不再自动请求。手动重新生成不受影响。"
+  },
+  "SCHEDULE_PLAN_PROVIDER_ID": {
+    "description": "【自主安排】今日计划生成模型 provider ID",
+    "type": "string",
+    "default": "",
+    "hint": "留空则跟随 LLM_PROVIDER_ID / AstrBot 默认聊天模型；填写 AstrBot 中某个聊天 provider 的 ID 后，今日计划单独使用该模型。"
+  },
+  "AUTONOMOUS_PLAN_MAX_RETRIES": {
+    "description": "【自主安排】计划生成失败后自动重试次数",
+    "type": "int",
+    "default": 2,
+    "min": 0,
+    "max": 5,
+    "hint": "首次失败后按 AUTONOMOUS_PLAN_RETRY_MINUTES 间隔重试，最多重试这么多次；全部失败或错过窗口，当天不再自动请求。手动重新生成不受影响。"
   },
   "AUTONOMOUS_PROACTIVE_WINDOW_MINUTES": {
     "description": "【自主安排】主动浏览默认时间段长度（分钟）",
