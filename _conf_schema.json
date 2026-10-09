@@ -87,10 +87,11 @@
     "hint": "冷却结束后只放行一个探测请求；成功后恢复，失败则重新冷却。建议 60-600 秒。"
   },
   "SUMMARY_PROVIDER_ID": {
-    "description": "【总结模型】AstrBot 模型提供商 ID",
+    "description": "【总结模型】选择 AstrBot 模型提供商",
     "type": "string",
     "default": "",
-    "hint": "选择 AstrBot 中的 provider ID；填写后优先于独立 API，留空沿用默认聊天模型或下方独立 API。"
+    "_special": "select_provider",
+    "hint": "从下拉列表选择 AstrBot 已配置的模型；选中后优先于下方独立 API。留空时，有独立 API 配置则使用它，否则沿用默认聊天模型。"
   },
   "SUMMARY_API_KEY": {
     "description": "【总结模型】独立 API 密钥",
@@ -111,10 +112,11 @@
     "hint": "使用独立 API 时必须填写模型名。总结用于视频内容、记忆整理和日/周总结；生成用于评分感想、推荐文案与动态。"
   },
   "GENERATION_PROVIDER_ID": {
-    "description": "【生成模型】AstrBot 模型提供商 ID",
+    "description": "【生成模型】选择 AstrBot 模型提供商",
     "type": "string",
     "default": "",
-    "hint": "选择 AstrBot 中的 provider ID；填写后优先于独立 API，留空沿用默认聊天模型或下方独立 API。"
+    "_special": "select_provider",
+    "hint": "从下拉列表选择 AstrBot 已配置的模型；选中后优先于下方独立 API。留空时，有独立 API 配置则使用它，否则沿用默认聊天模型。"
   },
   "GENERATION_API_KEY": {
     "description": "【生成模型】独立 API 密钥",
