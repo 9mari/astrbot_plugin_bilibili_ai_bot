@@ -1004,7 +1004,8 @@ UP主：{video.get('up_name', '')}
         try:
             d, _ = await self._http_get(
                 "https://api.bilibili.com/x/web-interface/index/top/rcmd",
-                params={"fresh_type": 4, "ps": 30, "fresh_idx": random.randint(1, 20),
+                # ps 超过 14 该接口直接返回 -400，取 12 留出余量
+                params={"fresh_type": 4, "ps": 12, "fresh_idx": random.randint(1, 20),
                          "fresh_idx_1h": random.randint(1, 10), "version": 1},
             )
             if d.get("code") == 0:
