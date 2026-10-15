@@ -4,6 +4,7 @@ import base64
 import json
 import re
 import shutil
+from .video_diagnostics import media_failure, get_call_diagnostic, set_call_diagnostic, exception_detail, safe_detail
 from datetime import datetime
 from astrbot.api import logger
 from .network import download_proxy_args, redact_proxy_error
@@ -472,6 +473,18 @@ class VideoMixin:
 
     # ── 视频分析 ──
     async def _analyze_video_with_vision(self, video_info):
+        try:
+            return await VideoMixin._analyze_video_with_vision_impl(self, video_info)
+        except Exception as exc:
+            # Keep the per-video failure visible in the caller's persisted log.
+            # CancelledError is deliberately not caught.
+            reason = exception_detail(exc, self.config)
+            media_failure(video_info, "analysis", reason, self.config)
+            video_info["analysis_basis"] = "metadata"
+            logger.warning(f"[BiliBot] 视频分析未完成: {reason}")
+            return "视频内容分析失败，未取得可靠内容。"
+
+    async def _analyze_video_with_vision_impl(self, video_info):
         """Serialize by BV and persist content before another entry can re-analyze."""
         bvid = str(video_info.get("bvid", "") or "")
         async with self._video_analysis_lock(bvid):
@@ -503,7 +516,10 @@ class VideoMixin:
             return result
 
     async def _analyze_video_with_vision_inner(self, video_info):
+        video_info.pop("_media_diagnostics", None)
         joint = await self._build_joint_context(video_info)
+        if not joint.get("subtitle"):
+            media_failure(video_info, "subtitles", "没有取得可用字幕（无字幕、获取失败或归属校验不通过）", self.config)
         media_result = await self._analyze_video_media(video_info) if self._should_use_visual_video_analysis(joint) else None
         if media_result:
             video_info["analysis_basis"] = "video_media"
@@ -527,20 +543,26 @@ UP主：{video_info.get('up_name') or video_info.get('owner_name', '未知')}
 直接输出概括内容，不要加前缀。"""
         result = await getattr(self, "_summary_llm_call", self._llm_call)(prompt, max_tokens=900)
         fallback = f"视频《{video_info.get('title', '未知')}》，UP主：{video_info.get('up_name') or video_info.get('owner_name', '未知')}"
+        if not result:
+            media_failure(video_info, "summary", get_call_diagnostic().get("reason") or "总结模型返回空内容，使用标题兜底", self.config)
         return self._clip_media_text(result or fallback, 1600)
 
     async def _analyze_video_media(self, video_info):
+        set_call_diagnostic()
         provider_id = self.config.get("VIDEO_VISION_PROVIDER_ID", "")
         client = self._get_video_vision_client()
         model = self.config.get("VIDEO_VISION_MODEL", "")
         if not provider_id and (not client or not model):
+            media_failure(video_info, "vision_config", "未配置可用的视频视觉提供商或独立 API 模型", self.config)
             return None
         bvid = video_info.get("bvid", "")
         if not bvid:
+            media_failure(video_info, "video_id", "视频 BV 号为空", self.config)
             return None
         fmt = self._detect_video_format(model)
         video_path = await self._download_video(bvid)
         if not video_path:
+            media_failure(video_info, "download", get_call_diagnostic().get("reason") or "未取得视频文件", self.config)
             return None
 
         segments = []
@@ -555,6 +577,7 @@ UP主：{video_info.get('up_name') or video_info.get('owner_name', '未知')}
             max_segments = max(1, int(self.config.get("VIDEO_SEGMENT_MAX_COUNT", 10)))
             segments = await self._slice_video_segments(video_path, segment_sec=segment_sec, max_segments=max_segments)
             if not segments:
+                media_failure(video_info, "slice", "切片未返回可用文件", self.config)
                 return None
 
             segment_analyses = []
@@ -567,6 +590,7 @@ UP主：{video_info.get('up_name') or video_info.get('owner_name', '未知')}
                     segment_analyses.append(result)
 
             if not segment_analyses:
+                media_failure(video_info, "vision", "全部片段分析失败，未取得画面内容", self.config)
                 return None
 
             # 单段直接返回
@@ -580,7 +604,8 @@ UP主：{video_info.get('up_name') or video_info.get('owner_name', '未知')}
             return ("【仅分析部分视频片段，不能确认全部内容】" if partial else "") + consolidated
 
         except Exception as e:
-            logger.warning(f"[BiliBot] 视频媒体分析失败({bvid})：{e}")
+            media_failure(video_info, "media", exception_detail(e, self.config), self.config)
+            logger.warning(f"[BiliBot] 视频媒体分析失败({bvid})：{exception_detail(e, self.config)}")
             return None
         finally:
             # 清理所有切片和帧
@@ -613,13 +638,16 @@ UP主：{video_info.get('up_name') or video_info.get('owner_name', '未知')}
                     result = await self._vision_call(client, model, content, max_tokens=450)
                 if result:
                     return self._clip_media_text(result, 600)
+                media_failure(video_info, "video_model", get_call_diagnostic().get("reason") or "视频直读返回空内容", self.config)
                 logger.warning(f"[BiliBot] 视频直读失败（{fmt}），回退截帧{label}")
             # 回退：截帧分析
             if not os.path.exists(seg_path):
+                media_failure(video_info, "frames", "片段文件不存在，无法截帧", self.config)
                 logger.warning(f"[BiliBot] 片段文件不存在，无法截帧{label}: {seg_path}")
                 return None
             frames = await self._extract_video_frames(seg_path, count=5)
             if not frames:
+                media_failure(video_info, "frames", "没有提取到视频画面", self.config)
                 return None
             frame_content = []
             for frame_path in frames:
@@ -630,9 +658,12 @@ UP主：{video_info.get('up_name') or video_info.get('owner_name', '未知')}
             result = await self._astrbot_multimodal_generate(provider_id, frame_content, max_tokens=450)
             if not result and client and model:
                 result = await self._vision_call(client, model, frame_content, max_tokens=450)
+            if not result:
+                media_failure(video_info, "frame_model", get_call_diagnostic().get("reason") or "截帧模型返回空内容", self.config)
             return self._clip_media_text(result, 600) if result else None
         except Exception as e:
-            logger.warning(f"[BiliBot] 片段分析失败{label}: {e}")
+            media_failure(video_info, "segment", exception_detail(e, self.config), self.config)
+            logger.warning(f"[BiliBot] 片段分析失败{label}: {exception_detail(e, self.config)}")
             return None
         finally:
             self._cleanup_video_artifacts(None, frames)
@@ -750,6 +781,7 @@ UP主：{video_info.get('up_name') or video_info.get('owner_name', '未知')}
         return candidates[0][2]
 
     async def _download_video(self, bvid, max_height=480):
+        set_call_diagnostic()
         proxy_args = download_proxy_args(self.config)
         output_template = os.path.join(TEMP_VIDEO_DIR, f"{bvid}.%(ext)s")
         # 生成 Netscape 格式 cookie 文件，兼容新版 yt-dlp
@@ -771,7 +803,8 @@ UP主：{video_info.get('up_name') or video_info.get('owner_name', '未知')}
             with os.fdopen(fd, "w") as f:
                 f.write(cookie_content)
         except Exception as e:
-            logger.warning(f"[BiliBot] Cookie文件写入失败: {e}")
+            set_call_diagnostic(reason=exception_detail(e, self.config))
+            logger.warning(f"[BiliBot] Cookie文件写入失败: {exception_detail(e, self.config)}")
             return None
 
         last_err = ""
@@ -818,7 +851,8 @@ UP主：{video_info.get('up_name') or video_info.get('owner_name', '未知')}
             except OSError:
                 pass
 
-        logger.warning(f"[BiliBot] 视频下载全部失败({bvid}): {last_err}")
+        set_call_diagnostic(reason=safe_detail(last_err, self.config))
+        logger.warning(f"[BiliBot] 视频下载全部失败({bvid}): {safe_detail(last_err, self.config)}")
         return None
 
     def _cleanup_partial_downloads(self, bvid):

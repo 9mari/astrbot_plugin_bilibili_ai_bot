@@ -4,6 +4,8 @@ import json
 import random
 import asyncio
 import traceback
+import time
+from .video_diagnostics import evaluation_failure, get_call_diagnostic, set_call_diagnostic, exception_detail
 from datetime import datetime, timedelta
 from astrbot.api import logger
 from .config import (
@@ -1082,8 +1084,23 @@ UP主：{video.get('up_name', '')}
         return "\n".join(parts)[:1000]
 
     async def _evaluate_video(self, video_info, video_description):
+        started = time.monotonic()
+        set_call_diagnostic()
+        try:
+            return await ProactiveMixin._evaluate_video_inner(self, video_info, video_description)
+        except Exception as exc:
+            reason = exception_detail(exc, self.config)
+            evaluation_failure(video_info, "evaluation_exception", reason, self.config,
+                               elapsed=time.monotonic() - started)
+            logger.warning(f"[BiliBot] 评价准备失败: {reason}")
+            return None
+
+    async def _evaluate_video_inner(self, video_info, video_description):
+        video_info.pop("_evaluation_diagnostic", None)
         if video_info.get("analysis_basis") in {"metadata", "seen_only"}:
-            logger.info("[BiliBot] 内容证据不足或仅有旧观看痕迹，本次不生成新的评分与喜好")
+            reason = "只有标题/简介，未取得可靠字幕或画面" if video_info.get("analysis_basis") == "metadata" else "仅剩旧观看痕迹，未重新观看，不生成新评分"
+            evaluation_failure(video_info, "content", reason, self.config)
+            logger.info(f"[BiliBot] 暂不评分: {reason}")
             return None
         sp = await self._get_system_prompt()
         on = self.config.get("OWNER_NAME", "") or "主人"
@@ -1139,9 +1156,13 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
             prompt += f"\n\n【补充提示词】{custom_proactive_inst}"
         prompt += "\n\n" + VIDEO_EVALUATION_SCHEMA_PROMPT
         text = None
+        started = time.monotonic()
+        set_call_diagnostic()
         try:
             text = await getattr(self, "_generation_llm_call", self._llm_call)(prompt, system_prompt=sp, max_tokens=1200)
             if not text:
+                reason = get_call_diagnostic().get("reason") or "模型返回空内容，未取得有效评价"
+                evaluation_failure(video_info, "model_request", reason, self.config, elapsed=time.monotonic() - started)
                 return None
             try:
                 evaluation = parse_video_evaluation(text)
@@ -1149,13 +1170,14 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                     evaluation["partition"] = str(video_info.get("tname") or "")[:30]
                 return evaluation
             except VideoEvaluationError as exc:
-                logger.warning(
-                    f"[BiliBot] 视频评价结构校验失败，放弃互动: {exc}; "
-                    f"output={str(text)[:120]}"
-                )
+                evaluation_failure(video_info, "evaluation_schema", str(exc), self.config,
+                                   elapsed=time.monotonic() - started, raw=text)
+                logger.warning(f"[BiliBot] 视频评价结构校验失败 bvid={video_info.get('bvid', '')}: {exc}")
                 return None
         except Exception as e:
-            logger.error(f"[BiliBot] 视频评价失败: {e} | raw={str(text)[:300]}")
+            reason = exception_detail(e, self.config)
+            evaluation_failure(video_info, "evaluation_exception", reason, self.config, elapsed=time.monotonic() - started)
+            logger.error(f"[BiliBot] 视频评价失败: {reason}")
             return None
 
     async def _generate_proactive_comment(self, video_info, video_description):
@@ -1551,6 +1573,8 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
             if not evaluation:
                 logger.warning("[BiliBot] 评价失败，跳过互动")
                 watch_log.append({"time": datetime.now().strftime("%Y-%m-%d %H:%M"), "bvid": bvid, "title": video.get("title", ""), "up_name": video.get("up_name", ""), "score": 0, "mood": "未知", "comment": "评价失败", "review": "", "actions": [], "pic": video.get("pic", ""), "tname": analysis_info.get("tname", ""), "source": video.get("_source", ""), "source_detail": video.get("_source_detail", ""), "manual": is_manual})
+                watch_log[-1]["evaluation_status"] = "failed"
+                watch_log[-1]["diagnostic"] = analysis_info.get("_evaluation_diagnostic", {})
                 watch_log[-1]["content_analyzed"] = analysis_info.get("analysis_basis") != "metadata"
                 watch_log[-1]["analysis_basis"] = analysis_info.get("analysis_basis", "legacy")
                 watch_log[-1]["discovery_mode"] = "explore" if video.get("_exploration") else "interest"
@@ -2004,6 +2028,8 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                     "score": 0, "mood": "未知", "comment": "评价失败", "review": "",
                     "actions": [], "pic": video.get("pic", ""), "tname": analysis_info.get("tname", ""),
                     "source": "special_follow",
+                    "evaluation_status": "failed",
+                    "diagnostic": analysis_info.get("_evaluation_diagnostic", {}),
                     "content_analyzed": analysis_info.get("analysis_basis") != "metadata",
                     "analysis_basis": analysis_info.get("analysis_basis", "legacy"),
                 })

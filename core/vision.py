@@ -4,6 +4,7 @@ import base64
 import aiohttp
 from .network import plugin_http_session, openai_proxy_kwargs, redact_proxy_error
 from astrbot.api import logger
+from .video_diagnostics import set_call_diagnostic, exception_detail, safe_detail
 
 
 class VisionMixin:
@@ -78,6 +79,7 @@ class VisionMixin:
 
     async def _vision_call(self, client, model, content_parts, max_tokens=250):
         """通用视觉模型调用"""
+        set_call_diagnostic(reason="视觉模型返回空内容", model=safe_detail(model, self.config, 100))
         try:
             resp = await client.chat.completions.create(
                 model=model,
@@ -86,7 +88,9 @@ class VisionMixin:
             )
             return resp.choices[0].message.content.strip() if resp.choices else None
         except Exception as e:
-            logger.error(f"[BiliBot] 视觉模型调用失败: {redact_proxy_error(e, self.config)}")
+            reason = exception_detail(e, self.config)
+            set_call_diagnostic(reason=reason, model=safe_detail(model, self.config, 100))
+            logger.error(f"[BiliBot] 视觉模型调用失败: {reason}")
             return None
 
     async def _fetch_image_base64(self, url):
@@ -153,6 +157,7 @@ class VisionMixin:
 
     async def _astrbot_multimodal_generate(self, provider_id, content_parts, max_tokens=250):
         """通过 AstrBot provider 进行多模态调用"""
+        set_call_diagnostic(reason="视觉提供商未配置" if not provider_id else "视觉模型返回空内容", provider=safe_detail(provider_id, self.config, 100))
         if not provider_id:
             return None
         try:
@@ -163,5 +168,7 @@ class VisionMixin:
             if resp and resp.completion_text:
                 return resp.completion_text.strip()
         except Exception as e:
-            logger.warning(f"[BiliBot] AstrBot 多模态 provider 调用失败({provider_id})：{e}")
+            reason = exception_detail(e, self.config)
+            set_call_diagnostic(reason=reason, provider=safe_detail(provider_id, self.config, 100))
+            logger.warning(f"[BiliBot] AstrBot 多模态 provider 调用失败：{reason}")
         return None

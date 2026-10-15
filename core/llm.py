@@ -3,6 +3,7 @@ import asyncio
 import time
 
 from astrbot.api import logger
+from .video_diagnostics import set_call_diagnostic, exception_detail, safe_detail
 
 
 class LLMMixin:
@@ -28,6 +29,7 @@ class LLMMixin:
         """Separate factual summaries from persona writing; blank settings inherit chat."""
         from .network import openai_proxy_kwargs
         prefix = str(purpose).upper()
+        set_call_diagnostic()
         provider = str(self.config.get(f"{prefix}_PROVIDER_ID", "") or "").strip()
         api_key = str(self.config.get(f"{prefix}_API_KEY", "") or "").strip()
         model = str(self.config.get(f"{prefix}_MODEL", "") or "").strip()
@@ -39,12 +41,15 @@ class LLMMixin:
                                         max_tokens=max_tokens)
         if not model:
             self._last_llm_error = f"{prefix} 独立 API 未填写模型名"
+            set_call_diagnostic(reason=self._last_llm_error, route="independent_api", purpose=prefix)
             logger.warning(f"[BiliBot] {self._last_llm_error}")
             return None
         circuit = self._task_llm_circuit(prefix)
+        set_call_diagnostic(route="independent_api", model=safe_detail(model, self.config, 100), purpose=prefix)
         mode = await circuit._enter_llm_circuit()
         if mode is None:
             self._last_llm_error = getattr(circuit, "_last_llm_error", "模型暂不可用")
+            set_call_diagnostic(reason=self._last_llm_error, stage="circuit")
             return None
         try:
             from openai import AsyncOpenAI
@@ -73,7 +78,8 @@ class LLMMixin:
             raise
         except Exception as exc:
             # API credentials or credential-bearing endpoints must not reach logs.
-            self._last_llm_error = f"{prefix} 独立 API 请求失败（{type(exc).__name__}）"
+            self._last_llm_error = f"{prefix} 独立 API 请求失败：{exception_detail(exc, self.config)}"
+            set_call_diagnostic(reason=self._last_llm_error, route="independent_api", model=safe_detail(model, self.config, 100))
             logger.warning(f"[BiliBot] {self._last_llm_error}")
             await circuit._record_llm_failure(mode, self._last_llm_error)
             return None
@@ -233,16 +239,20 @@ class LLMMixin:
 
     async def _llm_call(self, prompt, system_prompt="", max_tokens=300, provider_id=None, *, _circuit=None):
         self._last_llm_error = ""
+        set_call_diagnostic()
         circuit = _circuit if _circuit is not None else self
         circuit_mode = await circuit._enter_llm_circuit()
         if circuit_mode is None:
             self._last_llm_error = getattr(circuit, "_last_llm_error", "模型暂不可用")
+            set_call_diagnostic(reason=self._last_llm_error, stage="circuit")
             return None
         try:
             pid = self._resolve_chat_provider_id(provider_id)
+            set_call_diagnostic(route="astrbot_provider", provider=safe_detail(pid, self.config, 100))
             if not pid:
                 reason = "未找到可用的默认对话模型"
                 self._last_llm_error = reason
+                set_call_diagnostic(reason=reason, route="astrbot_provider", provider=safe_detail(pid, self.config, 100))
                 logger.error(f"[BiliBot] LLM 调用失败：{reason}，请检查 AstrBot 的默认聊天模型配置")
                 await circuit._record_llm_failure(circuit_mode, reason)
                 return None
@@ -255,6 +265,7 @@ class LLMMixin:
             if not text:
                 reason = "模型返回空内容"
                 self._last_llm_error = reason
+                set_call_diagnostic(reason=reason, route="astrbot_provider", provider=safe_detail(pid, self.config, 100))
                 logger.error(f"[BiliBot] LLM 调用失败：{reason}")
                 await circuit._record_llm_failure(circuit_mode, reason)
                 return None
@@ -267,9 +278,10 @@ class LLMMixin:
                 await circuit._release_llm_probe()
             raise
         except Exception as e:
-            self._last_llm_error = f"模型请求异常：{e}"[:240]
-            logger.error(f"[BiliBot] LLM 调用失败: {e}")
-            await circuit._record_llm_failure(circuit_mode, str(e))
+            self._last_llm_error = exception_detail(e, self.config)
+            set_call_diagnostic(reason=self._last_llm_error, route="astrbot_provider", provider=safe_detail(locals().get("pid", ""), self.config, 100))
+            logger.error(f"[BiliBot] LLM 调用失败: {self._last_llm_error}")
+            await circuit._record_llm_failure(circuit_mode, self._last_llm_error)
             return None
 
     async def _get_system_prompt(self):

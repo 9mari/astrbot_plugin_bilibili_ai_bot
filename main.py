@@ -1,5 +1,5 @@
 """
-AstrBot Plugin - Bilibili Bot 1.6.0
+AstrBot Plugin - Bilibili Bot 1.6.1
 自动回复评论、好感度、记忆、心情、用户画像、主动视频、动态发布。
 拆分版本：核心逻辑分布在 core/ 下的 Mixin 模块中。
 """
@@ -34,7 +34,7 @@ _astrbot_site_packages = os.path.join(os.path.expanduser("~"), ".astrbot", "data
 if os.path.isdir(_astrbot_site_packages) and _astrbot_site_packages not in sys.path:
     sys.path.insert(0, _astrbot_site_packages)
 
-@register("astrbot_plugin_bilibili_ai_bot","chenluQwQ","B站 AI Bot — 自动回复评论、好感度、记忆、心情、用户画像、主动视频、动态发布、LLM工具调用","1.6.0","https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot")
+@register("astrbot_plugin_bilibili_ai_bot","chenluQwQ","B站 AI Bot — 自动回复评论、好感度、记忆、心情、用户画像、主动视频、动态发布、LLM工具调用","1.6.1","https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot")
 class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, AffectionMixin, PersonalityMixin, BilibiliAPIMixin, BangumiMixin, WebSearchMixin, VideoMixin, ReplyMixin, ProactiveMixin, DynamicMixin, ScheduleMixin, WeeklySummaryMixin, ShareMixin, PrivateMessageMixin, LiveDanmakuMixin):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -591,7 +591,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         runtime_priorities = runtime_status.get("event_priorities", {})
         runtime_actions = runtime_status.get("action_states", {})
         lines = [
-            "📺 BiliBot 1.6.0 状态","━━━━━━━━━━━━",f"🍪 {info}",
+            "📺 BiliBot 1.6.1 状态","━━━━━━━━━━━━",f"🍪 {info}",
             f"{'🟢 运行中' if self._running else '🔴 未运行'}",
             f"🧠 记忆:{mc}条 | 💎永久:{pmc}条 | 👤档案:{pc}个",
             f"   📊 今日:{sum(1 for m in self._memory if m.get('level')=='today')} | 近期:{sum(1 for m in self._memory if m.get('level')=='recent')} | 长期:{sum(1 for m in self._memory if m.get('level')=='long_term')} | 老化:{sum(1 for m in self._memory if m.get('aged'))}",
@@ -1325,13 +1325,29 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             return f"📋 {target_date} 没有主动行为记录"
         lines = [f"📋 {target_date} 主动行为日志", "━━━━━━━━━━━━"]
         if today_watch:
-            lines.append(f"\n🎬 看了 {len(today_watch)} 个视频：")
+            lines.append(f"\n🎬 视频处理记录 {len(today_watch)} 条：")
             for i, w in enumerate(today_watch, 1):
                 score = w.get("score", "?")
                 actions = " ".join(w.get("actions", [])) or "无互动"
                 lines.append(f"  {i}. 「{w.get('title','?')[:30]}」")
                 lines.append(f"     🔗 bilibili.com/video/{w.get('bvid','')}")
-                lines.append(f"     UP:{w.get('up_name','?')} | {score}分 | {w.get('mood','?')}")
+                failed = w.get("evaluation_status") == "failed" or w.get("comment") == "评价失败"
+                if failed:
+                    detail = w.get("diagnostic") or {}
+                    stage = {"content": "内容不足", "model_request": "模型请求", "evaluation_schema": "评价格式校验", "evaluation_exception": "评价异常"}.get(detail.get("stage"), "评价")
+                    lines.append(f"     UP:{w.get('up_name','?')} | 未评分 | {stage}")
+                    lines.append(f"     ⚠️ {detail.get('reason') or '旧记录未保存原因，更新后的新记录会显示详情'}")
+                    for error in detail.get("media_errors", [])[-3:]:
+                        lines.append(f"     ↳ {error.get('stage', '')}: {error.get('reason', '')}")
+                    if detail.get("missing_fields"):
+                        lines.append("     缺少字段: " + ", ".join(detail["missing_fields"]))
+                    call = detail.get("model_call") or {}
+                    if call.get("provider") or call.get("model"):
+                        lines.append(f"     模型: {call.get('provider') or call.get('model')}")
+                    if "elapsed_seconds" in detail:
+                        lines.append(f"     时间: {detail.get('time', w.get('time', ''))} | 评价耗时: {detail['elapsed_seconds']}秒")
+                else:
+                    lines.append(f"     UP:{w.get('up_name','?')} | {score}分 | {w.get('mood','?')}")
                 if w.get("review"): lines.append(f"     📝 {w['review'][:60]}")
                 lines.append(f"     {actions}")
         if today_comment:
