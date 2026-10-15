@@ -7,3 +7,4 @@ openai>=1.55.3
 Pillow>=9.0
 qrcode>=7.4
 yt-dlp>=2025.1.0
+packaging>=23.2
