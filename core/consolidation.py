@@ -474,7 +474,7 @@ class ConsolidationEngine:
         prompt = MEMORY_EVALUATE_PROMPT.format(memories="\n".join(mem_lines))
 
         try:
-            resp = await self.bot._llm_call(prompt, max_tokens=600)
+            resp = await getattr(self.bot, "_summary_llm_call", self.bot._llm_call)(prompt, max_tokens=600)
             if not resp:
                 return None
             resp = self.bot._repair_llm_json(resp)

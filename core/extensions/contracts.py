@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Mapping
+
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import Version
 
 _CONTRACT_PATH = Path(__file__).with_name("extension_api_v1.json")
 CONTRACT: dict[str, Any] = json.loads(_CONTRACT_PATH.read_text(encoding="utf-8-sig"))
@@ -12,6 +16,15 @@ EXTENSION_TYPE = str(CONTRACT["extension_type"])
 PAGE_RENDERER = str(CONTRACT["renderer"])
 PERMISSIONS = frozenset(CONTRACT["permissions"])
 MANIFEST_REQUIRED = frozenset(CONTRACT["manifest_required"])
+HOST_VERSION = re.search(
+    r"^version:\s*(\S+)",
+    (Path(__file__).resolve().parents[2] / "metadata.yaml").read_text(encoding="utf-8-sig"),
+    re.MULTILINE,
+).group(1)
+
+
+def _valid_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", value))
 
 ALLOWED_COMPONENT_TYPES = frozenset({
     "creator-hero",
@@ -49,14 +62,33 @@ def validate_extension_manifest(manifest: Mapping[str, Any]) -> None:
         raise HostContractError("not a BiliBot extension")
     if manifest.get("extension_api") != EXTENSION_API_VERSION:
         raise HostContractError("incompatible Extension API version")
-    extension_id = str(manifest.get("id", ""))
-    if not extension_id or not extension_id.replace("-", "").replace("_", "").isalnum():
+    extension_id = manifest.get("id", "")
+    if not _valid_id(extension_id):
         raise HostContractError("manifest id must be a non-empty slug")
+    try:
+        requirement = manifest["host_requires"]
+        if not isinstance(requirement, str) or not requirement.strip():
+            raise HostContractError("host_requires must be a version requirement")
+        if Version(HOST_VERSION) not in SpecifierSet(requirement):
+            raise HostContractError("incompatible Host version")
+    except InvalidSpecifier as exc:
+        raise HostContractError("invalid Host version requirement") from exc
+    for field in ("permissions", "pages", "navigation", "actions"):
+        if not isinstance(manifest[field], list):
+            raise HostContractError(f"{field} must be a list")
+    if any(not isinstance(value, str) for value in manifest["permissions"]):
+        raise HostContractError("permissions must contain strings")
     unknown = set(manifest.get("permissions") or []) - PERMISSIONS
     if unknown:
         raise HostContractError(f"unknown permissions: {sorted(unknown)}")
     pages = manifest.get("pages") or []
-    page_ids = {str(item.get("id")) for item in pages if isinstance(item, Mapping)}
+    page_ids = set()
+    for page in pages:
+        if not isinstance(page, Mapping) or not _valid_id(page.get("id")):
+            raise HostContractError("page id must be a non-empty slug")
+        if page["id"] in page_ids:
+            raise HostContractError("duplicate page id")
+        page_ids.add(page["id"])
     if not page_ids:
         raise HostContractError("manifest must declare at least one page")
     for page in pages:
@@ -65,6 +97,14 @@ def validate_extension_manifest(manifest: Mapping[str, Any]) -> None:
     for item in manifest.get("navigation") or []:
         if not isinstance(item, Mapping) or str(item.get("page")) not in page_ids:
             raise HostContractError("navigation references an unknown page")
+    action_ids = set()
+    for action in manifest["actions"]:
+        action_id = action.get("id") if isinstance(action, Mapping) else action
+        if not _valid_id(action_id) or action_id in action_ids:
+            raise HostContractError("actions require unique non-empty ids")
+        action_ids.add(action_id)
+    if "presentation" in manifest and not isinstance(manifest["presentation"], Mapping):
+        raise HostContractError("presentation must be an object")
 
 
 def validate_page_schema(page: Mapping[str, Any]) -> None:

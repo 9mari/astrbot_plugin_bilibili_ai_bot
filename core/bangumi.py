@@ -367,7 +367,7 @@ class BangumiMixin:
             if len(ep_text) > 2000:
                 ep_text = ep_text[:2000] + "…（已截断）"
             prompt = f"你之前追过番剧《{season_title}》，以下是你看过的各集内容和感想，请用200字以内总结前情提要（重点剧情线和关键人物）：\n\n{ep_text}\n\n直接输出总结，不加前缀。"
-            result = await self._llm_call(prompt, max_tokens=300)
+            result = await getattr(self, "_summary_llm_call", self._llm_call)(prompt, max_tokens=300)
             if result:
                 logger.info(f"[BiliBot] 📝 番剧总结完成: 《{season_title}》前{len(episodes)}集")
             return result or ""
@@ -453,7 +453,7 @@ want_continue：是否值得继续追，烂番可以果断弃。
             prompt += f"\n\n【补充提示词】{custom_inst}"
         text = None
         try:
-            text = await self._llm_call(prompt, system_prompt=sp, max_tokens=350)
+            text = await getattr(self, "_generation_llm_call", self._llm_call)(prompt, system_prompt=sp, max_tokens=350)
             if not text:
                 return None
             try:

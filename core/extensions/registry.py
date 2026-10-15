@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import inspect
+import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -16,6 +18,8 @@ except Exception:  # pragma: no cover - test fallback
 from .contracts import validate_extension_manifest
 from .host_api import BiliBotExtensionHostAPI
 from .permissions import ExtensionGrant
+
+HOOK_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(slots=True)
@@ -37,7 +41,7 @@ def _plugin_instances(stars: Any) -> Iterable[Any]:
 
 
 async def _maybe_await(value: Any) -> Any:
-    return await value if inspect.isawaitable(value) else value
+    return await asyncio.wait_for(value, timeout=HOOK_TIMEOUT_SECONDS) if inspect.isawaitable(value) else value
 
 
 class ExtensionRegistry:
@@ -46,8 +50,11 @@ class ExtensionRegistry:
         self.plugin = plugin
         self.action_executor = action_executor
         self.extensions: dict[str, RegisteredExtension] = {}
+        self._lock = asyncio.Lock()
+        self._closed = False
 
     async def _unbind(self, record: RegisteredExtension) -> None:
+        record.host_api.revoke()
         unbind = getattr(record.plugin, "unbind_bilibot_host", None)
         if callable(unbind):
             try:
@@ -56,6 +63,12 @@ class ExtensionRegistry:
                 logger.warning(f"[BiliBot Extensions] unbind {record.extension_id} failed: {exc}")
 
     async def refresh(self) -> dict[str, RegisteredExtension]:
+        async with self._lock:
+            if self._closed:
+                return {}
+            return await self._refresh()
+
+    async def _refresh(self) -> dict[str, RegisteredExtension]:
         getter = getattr(self.context, "get_all_stars", None)
         if not callable(getter):
             for record in self.extensions.values():
@@ -66,10 +79,14 @@ class ExtensionRegistry:
             stars = await _maybe_await(getter())
         except Exception as exc:
             logger.warning(f"[BiliBot Extensions] discovery unavailable: {exc}")
+            for record in self.extensions.values():
+                await self._unbind(record)
+            self.extensions = {}
             return self.extensions
 
         discovered: dict[str, RegisteredExtension] = {}
         for extension in _plugin_instances(stars):
+            host_api = None
             manifest_getter = getattr(extension, "get_bilibot_extension_manifest", None)
             handler = getattr(extension, "handle_bilibot_extension_request", None)
             if not callable(manifest_getter) or not callable(handler):
@@ -77,7 +94,7 @@ class ExtensionRegistry:
             try:
                 manifest = await _maybe_await(manifest_getter())
                 validate_extension_manifest(manifest)
-                manifest = dict(manifest)
+                manifest = deepcopy(dict(manifest))
                 if manifest.get("enabled", True) is False:
                     continue
                 extension_id = str(manifest["id"])
@@ -85,17 +102,26 @@ class ExtensionRegistry:
                     logger.warning(f"[BiliBot Extensions] duplicate id skipped: {extension_id}")
                     continue
                 previous = self.extensions.get(extension_id)
-                if previous is not None and previous.plugin is extension:
+                grant = ExtensionGrant.create(extension_id, manifest.get("permissions") or [])
+                if previous is not None and previous.plugin is extension and previous.host_api._grant == grant:
                     previous.manifest = manifest
                     discovered[extension_id] = previous
                     continue
-                grant = ExtensionGrant.create(extension_id, manifest.get("permissions") or [])
+                if previous is not None:
+                    self.extensions.pop(extension_id)
+                    await self._unbind(previous)
                 host_api = BiliBotExtensionHostAPI(grant, self.plugin, self.action_executor)
                 binder = getattr(extension, "bind_bilibot_host", None)
                 if callable(binder):
                     await _maybe_await(binder(host_api))
                 discovered[extension_id] = RegisteredExtension(extension_id, extension, manifest, host_api)
+            except asyncio.CancelledError:
+                if host_api is not None:
+                    host_api.revoke()
+                raise
             except Exception as exc:
+                if host_api is not None:
+                    host_api.revoke()
                 logger.warning(f"[BiliBot Extensions] skipped incompatible extension: {exc}")
 
         for extension_id, record in self.extensions.items():
@@ -113,6 +139,8 @@ class ExtensionRegistry:
             raise KeyError(f"BiliBot extension not found: {extension_id}") from exc
 
     async def close(self) -> None:
-        for record in list(self.extensions.values()):
-            await self._unbind(record)
-        self.extensions = {}
+        async with self._lock:
+            self._closed = True
+            for record in list(self.extensions.values()):
+                await self._unbind(record)
+            self.extensions = {}

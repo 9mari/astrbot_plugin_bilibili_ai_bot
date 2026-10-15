@@ -367,9 +367,9 @@ def create_tools(plugin):
             parts.append(f"（UID={mid}，如需关注可调用 bili_action(action=follow)）")
             return "\n\n".join(parts)
 
-    async def _watch_video_for_tool(bvid):
+    async def _watch_video_for_tool(bvid, *, force_rewatch=False):
         result = await plugin._watch_video_and_save_memory(
-            bvid, memory_source="tool_watch"
+            bvid, memory_source="tool_watch", force_rewatch=force_rewatch
         )
         if result.get("ok"):
             result["message"] += (
@@ -380,17 +380,27 @@ def create_tools(plugin):
     @dataclass
     class WatchVideoTool(FunctionTool[AstrAgentContext]):
         name: str = "watch_video"
-        description: str = "Watch a Bilibili video and save to memory. Can then use like/coin/fav/follow/comment tools."
+        description: str = "Read watched video memories first; analyze and save a new Bilibili video once. Rewatch only on an explicit administrator request. Can then use interaction tools."
         parameters: dict = Field(default_factory=lambda: {
             "type": "object",
             "properties": {
                 "bvid": {"type": "string", "description": "BV ID, e.g. BV1xx411x7xx"},
+                "force_rewatch": {"type": "boolean", "default": False, "description": "Only true when administrator explicitly says to rewatch. Repeated links/questions use memories."},
             },
             "required": ["bvid"],
         })
 
         async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> ToolExecResult:
-            result = await _watch_video_for_tool(kwargs.get("bvid", ""))
+            event = getattr(getattr(context, "context", None), "event", None)
+            force = False
+            if kwargs.get("force_rewatch") is True and event is not None:
+                import re
+                try:
+                    text = str(getattr(event, "message_str", "") or "")
+                    force = bool(event.is_admin()) and bool(re.search(r"重新\s*看|重看", text))
+                except Exception:
+                    force = False
+            result = await _watch_video_for_tool(kwargs.get("bvid", ""), force_rewatch=force)
             return result["message"]
 
     @dataclass

@@ -11,13 +11,15 @@ import asyncio
 import traceback
 import hashlib
 import aiohttp
-from datetime import datetime
+from .network import plugin_http_session
+from datetime import datetime, timedelta
 from astrbot.api import logger
 from .config import (
     DAILY_SUMMARY_FILE, DEFAULT_DYNAMIC_TOPICS, DYNAMIC_LOG_FILE,
     PERMANENT_MEMORY_FILE, TEMP_IMAGE_DIR, WATCH_LOG_FILE, WEEKLY_SUMMARY_FILE,
 )
 from .runtime import ActionRequest, EventPriority
+from .security import wrap_untrusted, redact_outbound
 from .content_protocol import (
     ContentProtocolError, DYNAMIC_SCHEMA_PROMPT, parse_dynamic_content,
 )
@@ -134,7 +136,7 @@ class DynamicMixin:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        async with aiohttp.ClientSession() as s:
+        async with plugin_http_session(self.config) as s:
             async with s.post(
                 url,
                 headers=headers,
@@ -175,7 +177,7 @@ class DynamicMixin:
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         payload = {"model": model, "messages": [{"role": "user", "content": styled_prompt}], "modalities": ["image"]}
         try:
-            async with aiohttp.ClientSession() as s:
+            async with plugin_http_session(self.config) as s:
                 async with s.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=120)) as r:
                     if r.status != 200:
                         logger.error(f"[BiliBot] 图片生成HTTP错误: {r.status}")
@@ -216,52 +218,69 @@ class DynamicMixin:
             logger.error(f"[BiliBot] 图片生成异常: {e}")
             return None
 
-    def _dynamic_grounding_context(self):
-        """Return concrete same-day reasons that may justify an automatic post."""
-        today = datetime.now().strftime("%Y-%m-%d")
-        reasons = []
-        if hasattr(self, "_get_today_mood"):
-            mood, mood_reason = self._get_today_mood()
-            mood_reason = re.sub(r"\s+", " ", str(mood_reason or "")).strip()
-            if mood_reason:
-                reasons.append(f"当前情绪：{mood}；缘由：{mood_reason[:120]}")
-        watched = [
-            item for item in self._load_json(WATCH_LOG_FILE, [])
-            if isinstance(item, dict) and str(item.get("time") or "").startswith(today)
-        ]
-        def score_of(value):
-            try:
-                return float(value.get("score", 0) or 0)
-            except (TypeError, ValueError, OverflowError):
-                return 0.0
-
-        for item in sorted(watched, key=score_of, reverse=True)[:3]:
-            try:
-                score = float(item.get("score", 0) or 0)
-            except (TypeError, ValueError, OverflowError):
-                score = 0
-            if score < 8:
+    def _dynamic_post_due(self, history=None):
+        history = history if isinstance(history, list) else self._load_json(DYNAMIC_LOG_FILE, [])
+        try:
+            days = max(1, min(30, int(self.config.get("DYNAMIC_MIN_INTERVAL_DAYS", 1))))
+        except (TypeError, ValueError):
+            days = 1
+        today = datetime.now().date()
+        for item in reversed(history):
+            if not isinstance(item, dict):
                 continue
-            title = re.sub(r"\s+", " ", str(item.get("title") or "")).strip()[:60]
-            review = re.sub(r"\s+", " ", str(item.get("review") or item.get("comment") or "")).strip()[:120]
-            if title and review and review not in {"评价失败", "没什么感觉", "未知"}:
-                reasons.append(f"今天很喜欢的视频《{title}》：{review}")
-        daily_records = self._load_json(DAILY_SUMMARY_FILE, [])
-        for record in reversed(daily_records if isinstance(daily_records, list) else []):
-            if str(record.get("date") or "") == today:
-                summary = re.sub(r"\s+", " ", str(record.get("summary") or "")).strip()
-                if summary and not summary.startswith("（今日无"):
-                    reasons.append(f"今日日记：{summary[:180]}")
+            try:
+                posted = datetime.strptime(str(item.get("time", ""))[:10], "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if (today - posted).days < days:
+                return False
+        return True
+
+    def _dynamic_grounding_context(self):
+        """Public self-experiences can motivate a post even without an 8/10 video."""
+        cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M")
+        reasons = []
+        watched = self._load_json(WATCH_LOG_FILE, [])
+        for item in reversed(watched if isinstance(watched, list) else []):
+            if not isinstance(item, dict) or str(item.get("time", "")) < cutoff:
+                continue
+            title = str(item.get("title", ""))[:60]
+            review = str(item.get("review") or item.get("comment") or "").strip()[:160]
+            if title and review and review not in {"评价失败", "没什么感觉", "未知"} and item.get("analysis_basis") != "metadata":
+                reasons.append(f"[{str(item.get('time', ''))[:10]}] 视频《{title}》：{review}；内容：{str(item.get('content_summary', ''))[:180]}")
+            if len(reasons) >= 4:
                 break
-        week = datetime.now().strftime("%G-W%V")
-        weekly_records = self._load_json(WEEKLY_SUMMARY_FILE, [])
-        for record in reversed(weekly_records if isinstance(weekly_records, list) else []):
-            if str(record.get("week") or "") == week and str(record.get("time") or "").startswith(today):
-                summary = re.sub(r"\s+", " ", str(record.get("summary") or "")).strip()
-                if summary and not summary.startswith("（本周无"):
-                    reasons.append(f"今天的周回顾片段：{summary[:180]}")
+        # Only public self memories; private conversations and owner profiles never become post material.
+        for item in reversed(getattr(self, "_memory", [])):
+            if not isinstance(item, dict) or item.get("user_id") != "self":
+                continue
+            if item.get("memory_type") not in {"video", "bangumi", "dynamic"}:
+                continue
+            if str(item.get("source", "")).lower() in {"qq", "private", "private_message", "bilibili_private"} or item.get("privacy"):
+                continue
+            if str(item.get("time", "")) < cutoff or item.get("rpid") == "dynamic":
+                continue
+            text = str(item.get("text") or "").strip()[:220]
+            if text:
+                reasons.append(f"近期公开活动记忆（日期 {str(item.get('time', ''))[:10]}）：{text}")
+            if len(reasons) >= 6:
                 break
-        return reasons[:6]
+        # Only structured public media highlights from archived diaries, never raw chat summaries.
+        for filename in (DAILY_SUMMARY_FILE, WEEKLY_SUMMARY_FILE):
+            records = self._load_json(filename, [])
+            for record in reversed(records if isinstance(records, list) else []):
+                if not isinstance(record, dict) or str(record.get("date") or record.get("time") or "")[:10] < cutoff[:10]:
+                    continue
+                structured = record.get("structured", {})
+                if not isinstance(structured, dict):
+                    continue
+                for key in ("video_highlights", "bangumi_highlights"):
+                    highlights = structured.get(key, [])
+                    for item in highlights[:2] if isinstance(highlights, list) else []:
+                        if isinstance(item, dict) and item.get("title"):
+                            reasons.append(f"近期观看回顾：{str(item.get('title'))[:60]}；{str(item.get('review') or item.get('summary') or '')[:120]}")
+                break
+        return [redact_outbound(re.sub(r"\s+", " ", item), internal=False)[0] for item in reasons[:6]]
 
     async def _generate_dynamic_content(self, human_initiated=False):
         perm = self._load_json(PERMANENT_MEMORY_FILE, [])
@@ -290,17 +309,19 @@ class DynamicMixin:
             topics = ["只在今天确实有具体事情想说时，挑一个片段随口记下"]
         topic = random.choice(topics)
         sp = await self._get_system_prompt()
+        mood, mood_reason = self._get_today_mood() if hasattr(self, "_get_today_mood") else ("平静", "")
         grounding = self._dynamic_grounding_context()
-        grounding_text = "\n".join(f"- {item}" for item in grounding) or "- 今天没有足够具体的活动或情绪缘由"
+        grounding_text = wrap_untrusted("\n".join(f"- {item}" for item in grounding) or "近期没有足够具体的活动素材", "public_activity_memory")
         prompt = f"""你准备判断现在是否值得发一条B站动态。当前时段是：{time_hint}。管理员给的方向：{topic}{perm_section}{history_section}
 
-今天可以作为依据的真实片段：
+当前心情：{mood}（{str(mood_reason)[:120]}）。心情可以影响表达，但不能据此编造经历。
+近期可以作为依据的真实片段（按原日期叙述，过去的事不能说成今天）：
 {grounding_text}
 触发方式：{'管理员刚刚手动要求发动态' if human_initiated else '后台定时时刻到达'}
 
 B站动态的感觉：
-- 自动触发时，只有明显情绪、特别喜欢的视频、刚完成的周回顾或其他具体经历值得说，才选择post；定时时刻本身不是发布理由
-- 没有真实内容就选择skip，不使用泛泛话题、当前时间或“今天也要努力”等句子凑一条
+- 结合你的人设、近期公开观看记忆和当前心情，选择一个真实具体的细节写感想、吐槽、问题或联想；普通视频、困惑和不喜欢的体验也可以表达，不需要8分以上或强烈情绪。若确有新角度就选择post；定时到达表示一次表达机会；定时时刻本身不是发布理由，也不是必须完成的数量
+- 已有具体素材时主动尝试组织一条自然表达，不因为“没有惊艳发现”就跳过；没有具体素材或只会重复旧内容才选择skip。不能编造外出、游戏实操或线下生活经历，也不能公开私信、QQ聊天或主人的私密画像
 - 管理员手动触发时可以围绕给定方向创作，但仍不能伪造经历
 - 像本人忽然想起一个具体小事、感受或吐槽后随手发出来，不像在完成“发动态”任务
 - 一条只说一个中心，先让读者看得懂发生了什么或你在想什么；不要故作深沉、写成谜语或强行升华
@@ -315,7 +336,7 @@ B站动态的感觉：
         if custom_dynamic_inst:
             prompt += f"\n\n【补充提示词】{custom_dynamic_inst}"
         try:
-            text = await self._llm_call(prompt, system_prompt=sp, max_tokens=500)
+            text = await getattr(self, "_generation_llm_call", self._llm_call)(prompt, system_prompt=sp, max_tokens=500)
             if not text:
                 return None
             try:
@@ -345,10 +366,13 @@ B站动态的感觉：
         if autonomous_limit:
             max_daily = min(max_daily, autonomous_limit) if max_daily else autonomous_limit
         plan = self._autonomous_plan_for_today() if hasattr(self, "_autonomous_plan_for_today") else {}
-        if plan:
+        if plan and not human_initiated:
             max_daily = min(max_daily, len(plan.get("dynamic_times", [])))
         if len(today_posts) >= max_daily:
             logger.info(f"[BiliBot] 今天已发 {len(today_posts)} 条动态，跳过")
+            return
+        if not human_initiated and not self._dynamic_post_due(log):
+            logger.info("[BiliBot] 尚未到自动动态发布间隔，跳过")
             return
         logger.info("[BiliBot] 🤔 正在想要发什么...")
         content = await self._generate_dynamic_content(human_initiated=human_initiated)

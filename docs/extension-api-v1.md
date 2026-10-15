@@ -7,8 +7,10 @@ Extension API v1 让独立 AstrBot 插件以**受限扩展**形式接入 BiliBot
 - 扩展存在时：WebUI 显示模式入口，并由主插件渲染扩展返回的安全 Page Schema。
 - 扩展不存在、关闭或异常时：入口自动消失，BiliBot 原有页面、配置和运行逻辑不受影响。
 - 扩展只能获得 Host 明确授权的能力；声明权限不等于获得权限。
-- 扩展不能读取 Cookie、数据库连接、插件实例或其他内部对象。
+- Host 的公开方法不返回 Cookie、数据库连接、插件实例或其他内部对象。
 - Extension API v1 默认拒绝视频上传与正式发布。
+
+这是一套同进程插件接口，不是用于运行不可信 Python 代码的沙箱。只应安装可信扩展；Python 私有属性约定不构成操作系统级隔离。
 
 ## 扩展发现
 
@@ -22,6 +24,9 @@ async def handle_bilibot_extension_request(request: dict) -> dict: ...
 ```
 
 发现过程会隔离单个扩展异常，并跳过禁用扩展、无效 manifest、未知 API 版本和重复扩展 ID。
+Host 会校验 `host_requires` 版本范围，以及页面与动作的声明。异步发现/绑定/解绑最多等待 5 秒，页面与动作最多等待 30 秒；同步钩子必须快速返回，不能阻塞事件循环。主控制页面不会等待扩展发现完成才显示。
+
+停用、移除、关闭 Host 或变更权限时，原有 Host API 引用会被撤销。并发发现只会绑定一次。
 
 ## Manifest 与协议
 
@@ -88,7 +93,10 @@ Creator 视觉样式由主仓库内置的 `pages/bilibot/creator.css` 提供，�
 ```text
 account.identity.read
 memory.creator.read
+memory.creator.write
 activity.write
+analytics.video.read
+opportunities.read
 storage.extension.read
 storage.extension.write
 ```
@@ -101,6 +109,8 @@ actions.video.publish
 ```
 
 后续接入真实上传/发布时，应增加管理员显式授权、投稿预览、人工确认、速率限制和审计记录，而不是直接扩大默认权限。
+
+创作记忆读取只包含公开媒体记忆和当前扩展自己写入的 `creator` 记忆。私密媒体记录与其他扩展的草稿不进入此接口；写入的创作草稿保存在 `self` 域，不参与公开评论召回。`storage.extension.*` 是协议中的能力名称，当前 Host 不提供通用文件系统读写方法，扩展仍自行管理其私有存储。
 
 ## `list_creator_signals` 返回什么
 
@@ -125,6 +135,6 @@ score  mood  review  up_name  up_mid  tname  pic  actions
 Creator 仓库维护同名 `contracts/extension_api_v1.json`。修改协议时必须：
 
 1. 同步更新两端文件；
-2. 保持相同 SHA-256；
+2. 保持协议文件使用 LF 换行时的相同 SHA-256；
 3. 更新两端测试和文档；
 4. 对破坏性变更升级 `extension_api` 主版本。

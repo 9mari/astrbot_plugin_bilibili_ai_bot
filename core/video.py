@@ -6,11 +6,66 @@ import re
 import shutil
 from datetime import datetime
 from astrbot.api import logger
-from .config import VIDEO_MEMORY_FILE, TEMP_VIDEO_DIR
+from .network import download_proxy_args, redact_proxy_error
+from .config import VIDEO_MEMORY_FILE, TEMP_VIDEO_DIR, EXTERNAL_MEMORY_FILE
 
 
 class VideoMixin:
     """视频分析、下载、截帧、上下文。"""
+
+    def _cached_video_memory(self, bvid):
+        """Read the same content record for QQ, private messages and comments."""
+        cache = self._load_json(VIDEO_MEMORY_FILE, {})
+        if not isinstance(cache, dict):
+            cache = {}
+        item = cache.get(bvid, {})
+        if not isinstance(item, dict):
+            item = {}
+        # Old QQ link previews were inferred from metadata, not watched content.
+        preview_only = item.get("content_analyzed") is False or (item.get("source") == "group_share" and not item.get("content_analyzed"))
+        if preview_only:
+            item = {}
+        text = item.get("analysis") or item.get("summary", "")
+        if self._analysis_has_subtitle_mismatch(text):
+            item = {}
+        if not item:
+            external = self._load_json(EXTERNAL_MEMORY_FILE, {})
+            old = external.get(bvid, {}) if isinstance(external, dict) else {}
+            if isinstance(old, dict) and old.get("content_analyzed") is not False and (old.get("description") or old.get("analysis")):
+                item = {**old, "bvid": bvid, "summary": old.get("description") or old.get("analysis"),
+                        "time": old.get("watched_at") or old.get("time", ""),
+                        "owner_name": old.get("up_name", ""), "owner_mid": old.get("up_mid", ""),
+                        "source": "external_memory"}
+            else:
+                for old in reversed(getattr(self, "_memory", [])):
+                    if isinstance(old, dict) and old.get("bvid") == bvid and old.get("memory_type") == "video" and old.get("content_analyzed") is not False:
+                        item = {**old, "summary": old.get("video_summary") or old.get("text", ""),
+                                "title": old.get("video_title", ""), "source": "semantic_memory"}
+                        break
+        if not item:
+            return None
+        compact = {bvid: dict(item)}
+        self._compact_video_cache(compact)
+        item = compact.get(bvid, {})
+        if self._analysis_has_subtitle_mismatch(item.get("analysis") or item.get("summary")):
+            return None
+        if item.get("analysis") or item.get("summary"):
+            cache[bvid] = item
+            self._save_json(VIDEO_MEMORY_FILE, cache)
+            return item
+        return None
+
+    def _video_analysis_lock(self, bvid):
+        import asyncio
+        import weakref
+        locks = getattr(self, "_video_analysis_locks", None)
+        if locks is None:
+            locks = self._video_analysis_locks = weakref.WeakValueDictionary()
+        lock = locks.get(bvid)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[bvid] = lock
+        return lock
 
     @staticmethod
     def _clip_media_text(value, limit):
@@ -70,6 +125,8 @@ class VideoMixin:
                 "oid": oid,
             }
 
+            if not force_rewatch:
+                self._cached_video_memory(actual_bvid)
             video_cache = self._load_json(VIDEO_MEMORY_FILE, {})
             cached = video_cache.get(actual_bvid, {})
             cached_text = str(cached.get("analysis") or cached.get("summary") or "").strip()
@@ -86,9 +143,11 @@ class VideoMixin:
             cached = video_cache.get(actual_bvid, {})
             cached_analysis = str(cached.get("analysis", "") or "").strip()
             cached_summary = str(cached.get("summary", "") or "").strip()
-            if (cached_analysis or cached_summary) and not force_rewatch:
+            preview_only = cached.get("content_analyzed") is False or (cached.get("source") == "group_share" and not cached.get("content_analyzed"))
+            if (cached_analysis or cached_summary) and not force_rewatch and not preview_only:
                 video_description = self._clip_media_text(cached_analysis or cached_summary, 1600)
-                score = cached.get("score", 5)
+                score = cached.get("score")
+                score_reason = str(cached.get("score_reason", "") or "")
                 mood = cached.get("mood", "平静")
                 review = self._clip_media_text(cached.get("review", "") or "完整分析已清理，仅保留简短摘要", 320)
                 from_cache = True
@@ -98,7 +157,7 @@ class VideoMixin:
                 logger.info(f"[BiliBot] 📹 私信看片命中视频短期缓存/摘要索引：《{vi.get('title', '')}》")
             else:
                 seen_trace = await self._seen_video_record(actual_bvid)
-                if seen_trace and not force_rewatch:
+                if seen_trace and not force_rewatch and not preview_only:
                     link = f"https://www.bilibili.com/video/{actual_bvid}"
                     title = vi.get("title", "") or seen_trace.get("title", "")
                     owner_name = vi.get("owner_name", "") or seen_trace.get("owner_name", "")
@@ -119,13 +178,16 @@ class VideoMixin:
                         "seen_only": True,
                     }
                 logger.info(f"[BiliBot] 🎬 开始观看私信分享视频：《{vi.get('title', '')}》")
+                analysis_info["_force_rewatch"] = force_rewatch or removed_bad_cache
                 video_description = self._clip_media_text(
                     await self._analyze_video_with_vision(analysis_info), 1600
                 )
+                if analysis_info.get("_analysis_from_cache"):
+                    return await self._watch_video_and_save_memory(actual_bvid, memory_source=memory_source)
                 evaluation = await self._evaluate_video(
                     analysis_info, video_description
                 )
-                score = (evaluation or {}).get("score", 5)
+                score = (evaluation or {}).get("score")
                 score_reason = str((evaluation or {}).get("score_reason", ""))
                 mood = (evaluation or {}).get("mood", "平静")
                 review = self._clip_media_text((evaluation or {}).get("review", ""), 320)
@@ -134,6 +196,7 @@ class VideoMixin:
                 from_cache = False
 
                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+                video_cache = self._load_json(VIDEO_MEMORY_FILE, {})
                 video_cache[actual_bvid] = {
                     "bvid": actual_bvid,
                     "title": vi.get("title", ""),
@@ -151,11 +214,14 @@ class VideoMixin:
                     "search_keywords": search_keywords,
                     "time": now_str,
                     "source": memory_source,
+                    "analysis_basis": analysis_info.get("analysis_basis", "legacy"),
+                    "content_analyzed": analysis_info.get("analysis_basis") != "metadata",
                 }
                 self._save_json(VIDEO_MEMORY_FILE, video_cache)
-                await self._mark_video_seen(
-                    actual_bvid, analysis_info, source=memory_source
-                )
+                if analysis_info.get("analysis_basis") != "metadata":
+                    await self._mark_video_seen(
+                        actual_bvid, analysis_info, source=memory_source
+                    )
 
                 if self.config.get("ENABLE_VIDEO_LONG_TERM_MEMORY", True):
                     memory_text = (
@@ -170,20 +236,23 @@ class VideoMixin:
                         )
                     await self._save_self_memory_record(
                         f"{memory_source}:{actual_bvid}", self._clip_media_text(memory_text, 520), memory_type="video",
-                        extra={"bvid": actual_bvid, "owner_mid": str(vi.get("owner_mid", "")), "owner_name": vi.get("owner_name", ""), "video_title": vi.get("title", ""), "tname": (evaluation or {}).get("partition") or vi.get("tname", ""), "score": score, "score_reason": score_reason, "mood": mood, "review": review, "preference_signals": preference_signals, "search_keywords": search_keywords},
+                        extra={"bvid": actual_bvid, "owner_mid": str(vi.get("owner_mid", "")), "owner_name": vi.get("owner_name", ""), "video_title": vi.get("title", ""), "tname": (evaluation or {}).get("partition") or vi.get("tname", ""), "score": score, "score_reason": score_reason, "mood": mood, "review": review, "preference_signals": preference_signals, "search_keywords": search_keywords, "analysis_basis": analysis_info.get("analysis_basis", "legacy"), "content_analyzed": analysis_info.get("analysis_basis") != "metadata"},
                     )
                 logger.info(f"[BiliBot] ✅ 私信分享视频已看完并写入短期缓存：{actual_bvid}")
 
             link = f"https://www.bilibili.com/video/{actual_bvid}"
+            memory_note = "记忆已老化，仅保留摘要与当时感受，未重新观看。\n" if from_cache and cached.get("memory_stage") == "faded" else ""
             message = (
-                f"[{'已从记忆读取视频' if from_cache else '已看完视频'}]\n"
+                f"[{'已从记忆读取视频' if from_cache else '已完成视频分析'}]\n"
                 f"标题：{vi.get('title', '')}\n"
+                f"{memory_note}"
                 f"UP主：{vi.get('owner_name', '')}(UID:{vi.get('owner_mid', '')}) | 分区：{vi.get('tname', '')}\n"
                 f"链接：{link}\n"
                 f"视频简介：{str(vi.get('desc', '') or '')[:150]}\n"
                 f"内容详情：{video_description[:800]}\n"
                 f"我的感受：{review[:200]}\n"
-                f"个人评分：{score}/10 | 看完心情：{mood}\n"
+                f"个人评分：{str(score) + '/10' if score is not None else '未取得可靠评分，未评分'} | 心情：{mood}\n"
+                f"评分理由：{score_reason}\n"
                 f"oid={oid}"
             )
             share_info = dict(vi)
@@ -237,7 +306,7 @@ class VideoMixin:
 补充信息：{str(extra or '')[:500]}
 候选字幕：{subtitle_text[:1000]}"""
         try:
-            result = await self._llm_call(prompt, max_tokens=100)
+            result = await getattr(self, "_summary_llm_call", self._llm_call)(prompt, max_tokens=100)
             if not result:
                 return subtitle_text
             cleaned = self._repair_llm_json(result)
@@ -292,8 +361,6 @@ class VideoMixin:
 
     async def _merge_visual_and_joint(self, video_info, visual_summary, joint):
         """视觉分析结果与字幕/热评做最终联合整合。"""
-        if not joint.get("has_signal"):
-            return None
         visual_summary = self._clip_media_text(visual_summary, 1200)
         subtitle = self._clip_media_text(joint.get("subtitle", ""), 1800)
         extra = self._clip_media_text(joint.get("extra", ""), 1200)
@@ -304,8 +371,8 @@ class VideoMixin:
 {subtitle}
 【补充信息】{extra or '无'}
 {joint.get('joint_hint', '')}
-整合要点：画面分析与可靠字幕互相印证；信息冲突时优先相信实际画面、标题、简介和标签，忽略明显错配的候选字幕。不要在结果中说明字幕抓取、数据冲突或内部判断过程。直接输出概括内容，不要加前缀。"""
-        result = await self._llm_call(prompt, max_tokens=600)
+整合要点：按内容顺序保留2～4个具体观点、事件或操作，再保留一个最值得记住的细节；不要用“生动有趣”“适合某类人”代替内容。有片段缺失或只采样了画面时，必须保留这个限制。画面分析与可靠字幕互相印证；信息冲突时优先相信实际画面、标题、简介和标签，忽略明显错配的候选字幕。不要在结果中说明字幕抓取、数据冲突或内部判断过程。直接输出概括内容，不要加前缀。"""
+        result = await getattr(self, "_summary_llm_call", self._llm_call)(prompt, max_tokens=900)
         if result:
             logger.info("[BiliBot] 🔗 视觉+字幕+热评联合整合完成")
         return self._clip_media_text(result, 1600) if result else None
@@ -363,6 +430,12 @@ class VideoMixin:
                     "summary": faded_summary,
                     "time": str(item.get("time") or ""),
                     "source": str(item.get("source") or ""),
+                    "score": item.get("score"),
+                    "mood": item.get("mood", "平静"),
+                    "score_reason": self._clip_media_text(item.get("score_reason", ""), 120),
+                    "review": self._clip_media_text(item.get("review", ""), 160),
+                    "analysis_basis": item.get("analysis_basis", "legacy"),
+                    "content_analyzed": item.get("content_analyzed", True),
                     "memory_stage": "faded",
                     "faded_at": str(
                         item.get("faded_at") or now.strftime("%Y-%m-%d %H:%M")
@@ -379,7 +452,7 @@ class VideoMixin:
                 if item.get("summary") != summary:
                     item["summary"] = summary
                     changed = True
-                for key in ("analysis", "review"):
+                for key in ("analysis",):
                     if key in item:
                         item.pop(key, None)
                         changed = True
@@ -395,62 +468,65 @@ class VideoMixin:
         return changed
 
     def _should_use_visual_video_analysis(self, joint):
-        return str(self.config.get("VIDEO_VISUAL_ANALYSIS_POLICY", "when_text_insufficient")) == "always" or not joint.get("has_signal")
+        return str(self.config.get("VIDEO_VISUAL_ANALYSIS_POLICY", "when_text_insufficient")) == "always" or not joint.get("subtitle")
 
     # ── 视频分析 ──
     async def _analyze_video_with_vision(self, video_info):
+        """Serialize by BV and persist content before another entry can re-analyze."""
+        bvid = str(video_info.get("bvid", "") or "")
+        async with self._video_analysis_lock(bvid):
+            if bvid and not video_info.get("_force_rewatch"):
+                cached = self._cached_video_memory(bvid)
+                if cached:
+                    video_info["analysis_basis"] = cached.get("analysis_basis", "legacy")
+                    video_info["_analysis_from_cache"] = True
+                    return cached.get("analysis") or cached.get("summary")
+                seen = await self._seen_video_record(bvid)
+                if seen:
+                    video_info["analysis_basis"] = "seen_only"
+                    return "曾经看过该视频，细节已经淡忘；本次仅读取观看痕迹，没有重新分析。"
+            result = await self._analyze_video_with_vision_inner(video_info)
+            if result and bvid:
+                cache = self._load_json(VIDEO_MEMORY_FILE, {})
+                cache[bvid] = {
+                    "bvid": bvid, "title": video_info.get("title", ""),
+                    "owner_name": video_info.get("owner_name") or video_info.get("up_name", ""),
+                    "owner_mid": str(video_info.get("owner_mid") or video_info.get("up_mid", "")),
+                    "tname": video_info.get("tname", ""), "desc": video_info.get("desc", "")[:200],
+                    "analysis": result, "summary": self._clip_media_text(result, 360),
+                    "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "analysis_basis": video_info.get("analysis_basis", "legacy"),
+                    "content_analyzed": video_info.get("analysis_basis") != "metadata",
+                    "source": "video_analysis",
+                }
+                self._save_json(VIDEO_MEMORY_FILE, cache)
+            return result
+
+    async def _analyze_video_with_vision_inner(self, video_info):
         joint = await self._build_joint_context(video_info)
         media_result = await self._analyze_video_media(video_info) if self._should_use_visual_video_analysis(joint) else None
         if media_result:
+            video_info["analysis_basis"] = "video_media"
             merged = await self._merge_visual_and_joint(video_info, media_result, joint)
-            return self._clip_media_text(merged or media_result, 1600)
-        client = self._get_video_vision_client()
-        model = self.config.get("VIDEO_VISION_MODEL", "")
-        # Text/subtitle signals were enough and visual policy is conservative:
-        # summarize without sending even a cover image to a vision provider.
-        if joint.get("has_signal") and not self._should_use_visual_video_analysis(joint):
-            return await self._analyze_video_text(video_info, joint=joint)
-        dur_min = video_info.get("duration", 0) // 60
-        dur_sec = video_info.get("duration", 0) % 60
-        text_prompt = f"""请根据以下B站视频信息，写一段详细的内容概括（500字以内），包括：这个视频的主要内容和讲了什么、关键观点或亮点、视频类型/风格、可能的受众。
-
-视频标题：{video_info.get('title', '未知')}
-UP主：{video_info.get('owner_name', '未知')}
-分区：{video_info.get('tname', '未知')}
-时长：{dur_min}分{dur_sec}秒
-简介：{video_info.get('desc', '无')[:500]}{joint['extra']}{joint['subtitle']}
-{joint['joint_hint']}
-直接输出概括内容，不要加前缀。"""
-        provider_id = self.config.get("VIDEO_VISION_PROVIDER_ID", "")
-        provider_result = await self._astrbot_multimodal_generate(provider_id, [{"type": "text", "text": text_prompt}], max_tokens=500)
-        if provider_result:
-            return self._clip_media_text(provider_result, 1600)
-        if client and model and video_info.get("pic"):
-            try:
-                b64 = await self._fetch_image_base64(video_info["pic"])
-                if b64:
-                    content = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}, {"type": "text", "text": text_prompt}]
-                    result = await self._vision_call(client, model, content, max_tokens=500)
-                    if result:
-                        return self._clip_media_text(result, 1600)
-            except Exception as e:
-                logger.warning(f"[BiliBot] 视觉分析封面失败: {e}")
-        result = await self._llm_call(text_prompt, max_tokens=500)
-        fallback = f"视频《{video_info.get('title', '未知')}》，UP主：{video_info.get('owner_name', '未知')}，分区：{video_info.get('tname', '未知')}。简介：{video_info.get('desc', '无')[:100]}"
-        return self._clip_media_text(result or fallback, 1600)
+            content = self._clip_media_text(merged or media_result, 1600)
+            if media_result.startswith("【仅分析部分") and not content.startswith("【仅分析部分"):
+                content = "【仅分析部分视频片段，不能确认全部内容】" + content
+            return content
+        video_info["analysis_basis"] = "subtitles" if joint.get("subtitle") else "metadata"
+        return await self._analyze_video_text(video_info, joint=joint)
 
     async def _analyze_video_text(self, video_info, joint=None):
         joint = joint or await self._build_joint_context(video_info)
-        prompt = f"""请根据以下B站视频信息，写一段详细的内容概括（500字以内），包括：这个视频的主要内容和讲了什么、关键观点或亮点、视频类型/风格、可能的受众。
+        prompt = f"""根据提供的材料写可供之后回忆的视频内容摘要（350～500字以内）。先说具体讲了什么，再按内容顺序提炼2～4个具体观点、事件或操作，最后保留最值得记住的细节。不要套用“视频生动有趣、适合某某人群”等空话。只使用材料支持的信息；字幕和热评分开，热评不能证明画面发生过什么。没有视频画面或可靠字幕时，开头说明“仅依据标题/简介/观众评论，尚未确认完整内容”，不得声称看完、听到金句或看到剧情。
 
 视频标题：{video_info.get('title', '未知')}
-UP主：{video_info.get('up_name', '未知')}
+UP主：{video_info.get('up_name') or video_info.get('owner_name', '未知')}
 分区：{video_info.get('tname', '未知')}
 简介：{video_info.get('desc', '无')[:500]}{joint['extra']}{joint['subtitle']}
 {joint['joint_hint']}
 直接输出概括内容，不要加前缀。"""
-        result = await self._llm_call(prompt, max_tokens=500)
-        fallback = f"视频《{video_info.get('title', '未知')}》，UP主：{video_info.get('up_name', '未知')}"
+        result = await getattr(self, "_summary_llm_call", self._llm_call)(prompt, max_tokens=900)
+        fallback = f"视频《{video_info.get('title', '未知')}》，UP主：{video_info.get('up_name') or video_info.get('owner_name', '未知')}"
         return self._clip_media_text(result or fallback, 1600)
 
     async def _analyze_video_media(self, video_info):
@@ -495,10 +571,13 @@ UP主：{video_info.get('up_name', '未知')}
 
             # 单段直接返回
             if len(segment_analyses) == 1:
-                return segment_analyses[0]
+                partial = len(segment_analyses) < len(segments) or float(video_info.get("duration", 0) or 0) > segment_sec * max_segments
+                return ("【仅分析部分视频片段，不能确认全部内容】" if partial else "") + segment_analyses[0]
 
             # 多段：LLM 整合
-            return await self._consolidate_segment_analyses(video_info, segment_analyses)
+            consolidated = await self._consolidate_segment_analyses(video_info, segment_analyses)
+            partial = len(segment_analyses) < len(segments) or float(video_info.get("duration", 0) or 0) > segment_sec * max_segments
+            return ("【仅分析部分视频片段，不能确认全部内容】" if partial else "") + consolidated
 
         except Exception as e:
             logger.warning(f"[BiliBot] 视频媒体分析失败({bvid})：{e}")
@@ -521,16 +600,17 @@ UP主：{video_info.get('up_name', '未知')}
                 f"简介：「{video_info.get('desc', '无')[:300]}」。\n"
                 f"请具体描述{'这一段' if label else '这个视频'}：①讲了什么/发生了什么 ②画面与风格 "
                 f"③最有记忆点的细节（名场面、梗、金句、字幕关键信息）。"
-                f"这一段只写本段内容，不要替整条视频下结论；不要泛泛而谈，120字以内。"
+                f"按实际内容顺序保留2～4个具体事实或观点与一个关键细节；不描述未观察到的声音、对白或结局。"
+                f"这一段只写本段内容，不要替整条视频下结论；200～300字以内。"
             )
             # 尝试视频直读
             if fmt != "none":
                 with open(seg_path, "rb") as f:
                     video_b64 = base64.b64encode(f.read()).decode()
                 content = self._build_video_content(video_b64, text_prompt, fmt)
-                result = await self._astrbot_multimodal_generate(provider_id, content, max_tokens=200)
+                result = await self._astrbot_multimodal_generate(provider_id, content, max_tokens=450)
                 if not result and client and model:
-                    result = await self._vision_call(client, model, content, max_tokens=200)
+                    result = await self._vision_call(client, model, content, max_tokens=450)
                 if result:
                     return self._clip_media_text(result, 600)
                 logger.warning(f"[BiliBot] 视频直读失败（{fmt}），回退截帧{label}")
@@ -547,9 +627,9 @@ UP主：{video_info.get('up_name', '未知')}
                     img_b64 = base64.b64encode(f.read()).decode()
                 frame_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}})
             frame_content.append({"type": "text", "text": text_prompt})
-            result = await self._astrbot_multimodal_generate(provider_id, frame_content, max_tokens=200)
+            result = await self._astrbot_multimodal_generate(provider_id, frame_content, max_tokens=450)
             if not result and client and model:
-                result = await self._vision_call(client, model, frame_content, max_tokens=200)
+                result = await self._vision_call(client, model, frame_content, max_tokens=450)
             return self._clip_media_text(result, 600) if result else None
         except Exception as e:
             logger.warning(f"[BiliBot] 片段分析失败{label}: {e}")
@@ -574,7 +654,7 @@ UP主：{video_info.get('up_name', '未知')}
 {parts}
 
 直接输出整合后的概括，不要加前缀。"""
-        result = await self._llm_call(prompt, max_tokens=400)
+        result = await getattr(self, "_summary_llm_call", self._llm_call)(prompt, max_tokens=900)
         if result:
             logger.info(f"[BiliBot] 📹 长视频{len(segment_analyses)}段整合完成")
             return self._clip_media_text(result, 1600)
@@ -644,6 +724,7 @@ UP主：{video_info.get('up_name', '未知')}
         return formats
     _VIDEO_FILE_EXTS = {".mp4", ".mkv", ".webm", ".mov"}
     _AUDIO_FILE_EXTS = {".m4a", ".mp3", ".aac", ".opus", ".flac", ".wav"}
+    _VIDEO_DOWNLOAD_FORMAT_TIMEOUT = 120
 
     def _pick_downloaded_video_file(self, bvid):
         if not os.path.isdir(TEMP_VIDEO_DIR):
@@ -669,6 +750,7 @@ UP主：{video_info.get('up_name', '未知')}
         return candidates[0][2]
 
     async def _download_video(self, bvid, max_height=480):
+        proxy_args = download_proxy_args(self.config)
         output_template = os.path.join(TEMP_VIDEO_DIR, f"{bvid}.%(ext)s")
         # 生成 Netscape 格式 cookie 文件，兼容新版 yt-dlp
         cookie_file = os.path.join(TEMP_VIDEO_DIR, f"{bvid}_cookies.txt")
@@ -694,9 +776,15 @@ UP主：{video_info.get('up_name', '未知')}
 
         last_err = ""
         try:
-            for fmt in self._format_fallbacks(max_height):
+            formats = self._format_fallbacks(max_height)
+            total_formats = len(formats)
+            for format_index, fmt in enumerate(formats, start=1):
                 # 清理上一轮可能残留的部分文件
                 self._cleanup_partial_downloads(bvid)
+                logger.info(
+                    f"[BiliBot] 开始下载({bvid})，格式 {format_index}/{total_formats}，"
+                    f"单次最多等待 {self._VIDEO_DOWNLOAD_FORMAT_TIMEOUT} 秒"
+                )
                 code, _, stderr = await self._run_process(
                     "yt-dlp", "-o", output_template,
                     "--format", fmt,
@@ -705,8 +793,9 @@ UP主：{video_info.get('up_name', '未知')}
                     "--cookies", cookie_file,
                     "--add-header", "Referer: https://www.bilibili.com",
                     "--limit-rate", "2M",
+                    *proxy_args,
                     f"https://www.bilibili.com/video/{bvid}",
-                    timeout=600,
+                    timeout=self._VIDEO_DOWNLOAD_FORMAT_TIMEOUT,
                 )
                 if code == 0:
                     fp = self._pick_downloaded_video_file(bvid)
@@ -714,10 +803,15 @@ UP主：{video_info.get('up_name', '未知')}
                         logger.info(f"[BiliBot] 视频下载成功({bvid})，格式: {fmt}，文件: {os.path.basename(fp)}")
                         return fp
                     last_err = "yt-dlp 成功退出，但没有产出可发送的视频文件（可能只下载到音频）"
-                    logger.info(f"[BiliBot] {last_err}({bvid})，尝试下一个格式")
+                    next_step = "尝试下一个格式" if format_index < total_formats else "已无后续格式"
+                    logger.info(f"[BiliBot] {last_err}({bvid})，{next_step}")
                     continue
-                last_err = stderr[:200] if stderr else "unknown error"
-                logger.info(f"[BiliBot] 格式 {fmt} 下载失败({bvid})，尝试下一个: {last_err[:80]}")
+                last_err = redact_proxy_error(stderr, self.config)[:200] if stderr else "unknown error"
+                next_step = "尝试下一个格式" if format_index < total_formats else "已无后续格式"
+                logger.info(
+                    f"[BiliBot] 格式 {format_index}/{total_formats} 下载失败({bvid})，"
+                    f"{next_step}: {last_err[:80]}"
+                )
         finally:
             try:
                 os.remove(cookie_file)
@@ -859,13 +953,15 @@ UP主：{video_info.get('up_name', '未知')}
     async def _get_video_context(self, oid, comment_type):
         if comment_type != 1:
             return "", None
+        bvid = await self._oid_to_bvid(oid)
+        if bvid:
+            self._cached_video_memory(bvid)
         vc = self._load_json(VIDEO_MEMORY_FILE, {})
         if self._compact_video_cache(vc):
             self._save_json(VIDEO_MEMORY_FILE, vc)
-        bvid = await self._oid_to_bvid(oid)
         if not bvid:
             return "", None
-        if bvid in vc:
+        if bvid in vc and vc[bvid].get("content_analyzed") is not False and not (vc[bvid].get("source") == "group_share" and not vc[bvid].get("content_analyzed")):
             c = vc[bvid]
             if self._analysis_has_subtitle_mismatch(c.get("analysis") or c.get("summary", "")):
                 logger.warning(f"[BiliBot] 评论上下文丢弃字幕错配缓存: {bvid}")
@@ -891,7 +987,9 @@ UP主：{video_info.get('up_name', '未知')}
                         f"video:{bvid}", memory_text, memory_type="video",
                         extra={"bvid": bvid, "owner_mid": str(c.get("owner_mid", "")), "owner_name": c.get("owner_name", ""), "video_title": c.get("title", ""), "time": mem_time},
                     )
-                ctx = f"【当前视频】\n标题：{c.get('title', '')}\nUP主：{c.get('owner_name', '')}（UID:{c.get('owner_mid', '')}）\n分区：{c.get('tname', '')}\n简介：{c.get('desc', '')[:150]}\n内容概括：{self._clip_media_text(cached_summary, 240)}"
+                ctx = f"【当前视频·从观看记忆读取】\n标题：{c.get('title', '')}\nUP主：{c.get('owner_name', '')}（UID:{c.get('owner_mid', '')}）\n分区：{c.get('tname', '')}\n简介：{c.get('desc', '')[:150]}\n内容概括：{self._clip_media_text(cached_summary, 240)}"
+                if c.get("score") is not None:
+                    ctx += f"\n当时评分：{c.get('score')}/10；理由：{c.get('score_reason', '')}；感想：{c.get('review', '')}"
                 tags = await self._get_video_tags(bvid)
                 comments = await self._get_hot_comments(oid)
                 if tags:
@@ -915,21 +1013,26 @@ UP主：{video_info.get('up_name', '未知')}
         analysis = self._clip_media_text(await self._analyze_video_with_vision(vi), 1600)
         logger.info(f"[BiliBot] 📹 分析结果：{analysis[:60]}...")
         analyzed_at = datetime.now().strftime("%Y-%m-%d %H:%M")
-        cache_entry = {"bvid": bvid, "title": vi["title"], "desc": vi.get("desc", "")[:200], "owner_name": vi["owner_name"], "owner_mid": str(vi["owner_mid"]), "tname": vi["tname"], "analysis": analysis, "summary": self._clip_media_text(analysis, 220), "time": analyzed_at}
+        cache_entry = {"bvid": bvid, "title": vi["title"], "desc": vi.get("desc", "")[:200], "owner_name": vi["owner_name"], "owner_mid": str(vi["owner_mid"]), "tname": vi["tname"], "analysis": analysis, "summary": self._clip_media_text(analysis, 360), "time": analyzed_at, "analysis_basis": vi.get("analysis_basis", "legacy"), "content_analyzed": vi.get("analysis_basis") != "metadata"}
+        vc = self._load_json(VIDEO_MEMORY_FILE, {})
+        previous = vc.get(bvid, {})
+        if vi.get("_analysis_from_cache") and isinstance(previous, dict):
+            cache_entry = previous
         vc[bvid] = cache_entry
         self._save_json(VIDEO_MEMORY_FILE, vc)
-        await self._mark_video_seen(
-            bvid, cache_entry, source="comment_video_context"
-        )
+        if vi.get("analysis_basis") != "metadata":
+            await self._mark_video_seen(
+                bvid, cache_entry, source="comment_video_context", increment=not vi.get("_analysis_from_cache", False)
+            )
         memory_text = (
             f"[{analyzed_at}] 视频分析记忆：标题《{vi['title']}》 "
             f"UP主:{vi['owner_name']} 分区:{vi['tname']} "
             f"简介:{vi.get('desc', '')[:120]} 内容概括:{analysis[:200]}"
         )
-        if self.config.get("ENABLE_VIDEO_LONG_TERM_MEMORY", True):
+        if self.config.get("ENABLE_VIDEO_LONG_TERM_MEMORY", True) and vi.get("analysis_basis") != "metadata":
             await self._save_self_memory_record(
                 f"video:{bvid}", memory_text, memory_type="video",
-                extra={"bvid": bvid, "owner_mid": str(vi["owner_mid"]), "owner_name": vi.get("owner_name", ""), "video_title": vi["title"]},
+                extra={"bvid": bvid, "owner_mid": str(vi["owner_mid"]), "owner_name": vi.get("owner_name", ""), "video_title": vi["title"], "analysis_basis": vi.get("analysis_basis", "legacy"), "content_analyzed": vi.get("analysis_basis") != "metadata"},
             )
         ctx = f"【当前视频】\n标题：{vi['title']}\nUP主：{vi['owner_name']}（UID:{vi['owner_mid']}）\n分区：{vi['tname']}\n简介：{vi.get('desc', '')[:150]}\n内容概括：{analysis}"
         tags = await self._get_video_tags(bvid)
@@ -1155,6 +1258,5 @@ UP主：{video_info.get('up_name', '未知')}
         except Exception as e:
             logger.debug(f"[BiliBot] 动态详情API获取失败(id={dynamic_id}): {e}")
         return ""
-
 
 

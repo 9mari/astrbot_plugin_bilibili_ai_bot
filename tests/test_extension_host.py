@@ -1,5 +1,7 @@
 import asyncio
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -29,6 +31,21 @@ BASE_MANIFEST = {
         "actions.video.publish",
     ],
 }
+
+
+@pytest.fixture
+def isolated_config(tmp_path, monkeypatch):
+    """Keep standalone tests independent of AstrBot and any user's stored data."""
+    import core
+    config = types.ModuleType("core.config")
+    config.DATA_DIR = tmp_path
+    for name in ("WATCH_LOG_FILE", "VIDEO_MEMORY_FILE", "BANGUMI_WATCH_LOG_FILE", "DYNAMIC_LOG_FILE"):
+        path = tmp_path / (name.lower() + ".json")
+        path.write_text("[]", encoding="utf-8")
+        setattr(config, name, path)
+    monkeypatch.setitem(sys.modules, "core.config", config)
+    monkeypatch.setattr(core, "config", config, raising=False)
+    return config
 
 
 class Metadata:
@@ -243,8 +260,8 @@ def test_creator_memory_is_sanitized_and_namespaced():
     assert call["extra"]["creator_extension_id"] == "creator"
 
 
-def test_activity_and_signals_never_expose_credentials(tmp_path, monkeypatch):
-    import core.config as config
+def test_activity_and_signals_never_expose_credentials(tmp_path, monkeypatch, isolated_config):
+    config = isolated_config
 
     watch = tmp_path / "watch.json"
     bangumi = tmp_path / "bangumi.json"
@@ -271,7 +288,7 @@ def test_activity_and_signals_never_expose_credentials(tmp_path, monkeypatch):
     assert opportunities[0]["eligibility"] == "review_required"
 
 
-def test_signals_carry_the_judgement_a_browsing_pass_already_made(tmp_path, monkeypatch):
+def test_signals_carry_the_judgement_a_browsing_pass_already_made(tmp_path, monkeypatch, isolated_config):
     """A pass scored the video and wrote down what it thought; pass that on.
 
     Sending only the summary made extensions re-watch to recover judgement this side
@@ -279,7 +296,7 @@ def test_signals_carry_the_judgement_a_browsing_pass_already_made(tmp_path, monk
     the score drives real interactions, and a coin or a favourite is a scarce
     commitment.
     """
-    import core.config as config
+    config = isolated_config
 
     watch = tmp_path / "watch.json"
     memory = tmp_path / "video_memory.json"
@@ -293,7 +310,7 @@ def test_signals_carry_the_judgement_a_browsing_pass_already_made(tmp_path, monk
     }]), encoding="utf-8")
     # video_memory is a dict keyed by bvid and holds the long analysis text.
     memory.write_text(json.dumps({"BV1": {
-        "title": "十分钟讲透扩散模型", "bvid": "BV1",
+        "title": "十分钟讲透扩散模型",
         "analysis": "用动画讲清了加噪和去噪两个方向，" * 6,
     }}), encoding="utf-8")
     bangumi.write_text("[]", encoding="utf-8")
@@ -341,3 +358,158 @@ def test_webui_mode_entry_is_manifest_driven_not_creator_hardcoded():
     entry_pos = source.index("${renderModeEntry(modeExtensions)}", brand_pos)
     nav_pos = source.index('<nav class="nav-list">', brand_pos)
     assert brand_pos < entry_pos < nav_pos
+
+
+@pytest.mark.parametrize("changes", [
+    {"host_requires": ">=99.0"}, {"host_requires": "invalid"},
+    {"pages": [{"renderer": "bilibot-schema-v1"}]},
+    {"pages": [{"id": "x", "renderer": "bilibot-schema-v1"}] * 2},
+    {"actions": ["publish", "publish"]}, {"permissions": "account.identity.read"},
+    {"presentation": []},
+])
+def test_incompatible_manifests_are_rejected(changes):
+    from core.extensions.contracts import validate_extension_manifest
+    with pytest.raises(ValueError):
+        validate_extension_manifest({**BASE_MANIFEST, **changes})
+
+
+def test_dispatch_rejects_undeclared_operations_before_calling_extension():
+    creator = CreatorExtension()
+    _, dispatcher = make_dispatcher(Context([Metadata(creator)]))
+    for operation in ("page:secret", "action:delete-all", "arbitrary"):
+        with pytest.raises(ValueError):
+            asyncio.run(dispatcher.dispatch("creator", operation))
+    assert creator.last_request is None
+
+
+def test_removed_and_closed_bindings_cannot_keep_using_host():
+    async def scenario():
+        creator = CreatorExtension()
+        context = Context([Metadata(creator)])
+        registry, dispatcher = make_dispatcher(context)
+        await dispatcher.list_extensions()
+        old_host = creator.host
+        context.stars = []
+        await registry.refresh()
+        with pytest.raises(PermissionError):
+            old_host.get_account_snapshot()
+        assert old_host.describe()["bound"] is False
+        context.stars = [Metadata(creator)]
+        await registry.refresh()
+        new_host = creator.host
+        await registry.close()
+        with pytest.raises(PermissionError):
+            new_host.get_account_snapshot()
+        assert await registry.refresh() == {}
+    asyncio.run(scenario())
+
+
+def test_permission_changes_revoke_the_previous_binding():
+    async def scenario():
+        creator = CreatorExtension()
+        registry, dispatcher = make_dispatcher(Context([Metadata(creator)]))
+        await dispatcher.list_extensions()
+        old_host = creator.host
+        creator.manifest["permissions"] = ["memory.creator.read"]
+        await registry.refresh()
+        assert creator.unbound == 1
+        assert creator.host is not old_host
+        with pytest.raises(PermissionError):
+            old_host.get_account_snapshot()
+        with pytest.raises(PermissionError):
+            creator.host.get_account_snapshot()
+    asyncio.run(scenario())
+
+
+def test_concurrent_discovery_binds_each_instance_once():
+    async def scenario():
+        creator = CreatorExtension()
+        calls = []
+        async def bind(host):
+            calls.append(host)
+            await asyncio.sleep(0)
+            creator.host = host
+        creator.bind_bilibot_host = bind
+        registry, _ = make_dispatcher(Context([Metadata(creator)]))
+        await asyncio.gather(registry.refresh(), registry.refresh())
+        assert len(calls) == 1
+    asyncio.run(scenario())
+
+
+def test_async_extension_timeout_does_not_block_healthy_extensions(monkeypatch):
+    import core.extensions.registry as registry_module
+    import core.extensions.dispatcher as dispatcher_module
+    monkeypatch.setattr(registry_module, "HOOK_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(dispatcher_module, "REQUEST_TIMEOUT_SECONDS", 0.01)
+    async def never(*args):
+        await asyncio.Event().wait()
+    async def scenario():
+        broken = CreatorExtension()
+        broken.get_bilibot_extension_manifest = never
+        healthy = CreatorExtension()
+        registry, dispatcher = make_dispatcher(Context([Metadata(broken), Metadata(healthy)]))
+        assert list(await registry.refresh()) == ["creator"]
+        healthy.handle_bilibot_extension_request = never
+        with pytest.raises(TimeoutError):
+            await dispatcher.dispatch("creator", "page:dashboard")
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("query", ["", "draft"])
+def test_creator_recall_excludes_private_media_and_other_extensions(query):
+    class ScopedMemoryAPI:
+        rows = [
+            {"rpid": "public", "memory_type": "video", "scope": "proactive", "text": "public"},
+            {"rpid": "private", "memory_type": "video", "scope": "bili_dm", "text": "private"},
+            {"rpid": "own", "memory_type": "creator", "scope": "self", "source": "bilibot_extension:creator", "text": "own draft"},
+            {"rpid": "other", "memory_type": "creator", "scope": "self", "source": "bilibot_extension:other", "text": "other draft"},
+        ]
+        def get_recent_memories(self, *, reader_scope, memory_types, source=None, **kwargs):
+            return [item for item in self.rows if item["memory_type"] in memory_types
+                    and (reader_scope == "admin" or item["scope"] in {"proactive", "bili_comment"})
+                    and (source is None or item.get("source") == source)]
+        def search(self, query, **kwargs):
+            return self.get_recent_memories(**kwargs)
+    plugin = HostPlugin()
+    plugin.memory_api = ScopedMemoryAPI()
+    creator = CreatorExtension()
+    _, dispatcher = make_dispatcher(Context([Metadata(creator)]), plugin)
+    asyncio.run(dispatcher.list_extensions())
+    rows = asyncio.run(creator.host.read_creator_memory(query))
+    assert {row["rpid"] for row in rows} == {"public", "own"}
+
+
+def test_host_uses_plugin_relative_config_in_installed_namespace(tmp_path, monkeypatch, isolated_config):
+    import importlib
+    package_name = "deployed_bilibot_test"
+    root = Path(__file__).resolve().parents[1]
+    for name, folder in [(package_name, root), (package_name + ".core", root / "core")]:
+        package = types.ModuleType(name)
+        package.__path__ = [str(folder)]
+        monkeypatch.setitem(sys.modules, name, package)
+    config = types.ModuleType(package_name + ".core.config")
+    config.DATA_DIR = tmp_path / "installed"
+    config.DATA_DIR.mkdir()
+    monkeypatch.setitem(sys.modules, config.__name__, config)
+    module = importlib.import_module(package_name + ".core.extensions.host_api")
+    permission_module = importlib.import_module(package_name + ".core.extensions.permissions")
+    grant = permission_module.ExtensionGrant.create("creator", ["activity.write"])
+    host = module.BiliBotExtensionHostAPI(grant, HostPlugin(), reject_write)
+    host.record_creator_activity({"title": "test"})
+    assert (config.DATA_DIR / "creator_extension_activity.json").is_file()
+    assert not (isolated_config.DATA_DIR / "creator_extension_activity.json").exists()
+
+
+def test_link_previews_are_not_reported_as_watched_signals(isolated_config):
+    Path(isolated_config.VIDEO_MEMORY_FILE).write_text(json.dumps({
+        "BVpreview": {"title": "preview only", "content_analyzed": False},
+        "BVlegacy": {"title": "legacy preview", "source": "group_share"},
+        "BVwatched": {"title": "watched", "content_analyzed": True, "owner_name": "UP", "owner_mid": "42"},
+    }), encoding="utf-8")
+    creator = CreatorExtension()
+    _, dispatcher = make_dispatcher(Context([Metadata(creator)]))
+    asyncio.run(dispatcher.list_extensions())
+    signals = creator.host.list_creator_signals()
+    assert len(signals) == 1
+    assert signals[0]["source_ref"] == "BVwatched"
+    assert signals[0]["up_name"] == "UP"

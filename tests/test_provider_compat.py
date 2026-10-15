@@ -186,7 +186,7 @@ class NovelAICompatibilityTests(unittest.TestCase):
         result = asyncio.run(bot._generate_dynamic_content(human_initiated=False))
         self.assertEqual(result["decision"], "skip")
         self.assertIn("定时时刻本身不是发布理由", bot.prompt)
-        self.assertIn("今天没有足够具体", bot.prompt)
+        self.assertIn("近期没有足够具体", bot.prompt)
 
 
 class ProviderConfigSchemaTests(unittest.TestCase):

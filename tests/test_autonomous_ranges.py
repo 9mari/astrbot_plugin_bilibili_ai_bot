@@ -6,7 +6,7 @@ import tempfile
 import types
 import unittest
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from pathlib import Path
 
 
@@ -394,6 +394,27 @@ def _check_config_schema_has_no_duplicate_keys():
     assert duplicates == []
 
 
+def _check_interaction_ad_filter_handles_plus_and_invalid_patterns():
+    probe = ReplyProbe({
+        "FILTER_LOW_VALUE_MESSAGES": False,
+        "FILTER_AD_MESSAGES": True,
+        "FILTER_DUPLICATE_MESSAGES": False,
+    })
+    assert probe._interaction_filter_reason("+vx abc123", "comment") == "advertisement_or_contact_spam"
+
+    probe_type = type(probe)
+    original_patterns = probe_type._AD_PATTERNS
+    original_logged = probe_type._INVALID_AD_PATTERNS_LOGGED
+    try:
+        probe_type._AD_PATTERNS = (r"(?:加|+)(?:微|vx)", r"https?://")
+        probe_type._INVALID_AD_PATTERNS_LOGGED = set()
+        assert probe._interaction_filter_reason("普通交流内容", "comment") is None
+        assert probe._interaction_filter_reason("https://example.com", "comment") == "advertisement_or_contact_spam"
+    finally:
+        probe_type._AD_PATTERNS = original_patterns
+        probe_type._INVALID_AD_PATTERNS_LOGGED = original_logged
+
+
 def _check_video_format_fallbacks_include_portrait_short_side():
     formats = VideoProbe({})._format_fallbacks(480)
     assert any("[width<=360]" in value for value in formats)
@@ -402,6 +423,29 @@ def _check_video_format_fallbacks_include_portrait_short_side():
         "bestvideo+bestaudio/best",
         "worst[ext=mp4][vcodec!=none]/worst[vcodec!=none]",
     ]
+
+
+def _check_video_download_uses_short_timeout_for_each_format():
+    probe = VideoProbe({"PROXY_URL": "http://127.0.0.1:7890"})
+    observed_timeouts = []
+    observed_formats = []
+
+    async def fake_run_process(*args, **kwargs):
+        assert args[args.index("--proxy") + 1] == "http://127.0.0.1:7890"
+        format_pos = args.index("--format")
+        observed_formats.append(args[format_pos + 1])
+        observed_timeouts.append(kwargs.get("timeout"))
+        return 1, "", "test failure"
+
+    probe._run_process = fake_run_process
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with patch("core.video.TEMP_VIDEO_DIR", temp_dir):
+            result = asyncio.run(probe._download_video("BV1TEST12345", max_height=360))
+
+    expected_formats = probe._format_fallbacks(360)
+    assert result is None
+    assert observed_formats == expected_formats
+    assert observed_timeouts == [120] * len(expected_formats)
 
 
 def _check_video_cache_uses_detail_long_term_and_faded_stages():
@@ -429,12 +473,13 @@ def _check_video_cache_uses_detail_long_term_and_faded_stages():
     assert "analysis" in cache["detail"]
     assert cache["long"]["memory_stage"] == "long_term"
     assert "analysis" not in cache["long"]
-    assert "review" not in cache["long"]
+    assert cache["long"].get("review") == "详细感想"
     assert cache["long"]["summary"]
     assert cache["faded"]["memory_stage"] == "faded"
     assert set(cache["faded"]) == {
         "bvid", "title", "owner_name", "owner_mid", "tname", "summary",
         "time", "source", "memory_stage", "faded_at",
+        "score", "mood", "score_reason", "review", "analysis_basis", "content_analyzed",
     }
     assert not probe._compact_video_cache(cache)
 
@@ -579,7 +624,7 @@ class AsyncRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(probe.llm_calls, 1)
         self.assertEqual(first, second)
 
-    async def test_failed_daily_plan_retries_only_once_at_retry_slot(self):
+    async def test_failed_daily_plan_retries_respect_configured_limit(self):
         class FrozenDateTime(datetime):
             current = datetime(2026, 8, 20, 8, 5, 0)
 
@@ -588,6 +633,7 @@ class AsyncRegressionTests(unittest.IsolatedAsyncioTestCase):
                 return cls.current
 
         probe = FailingPlanProbe()
+        probe.config["AUTONOMOUS_PLAN_MAX_RETRIES"] = 1
         with patch("core.schedule_mixin.datetime", FrozenDateTime):
             first = await probe._ensure_autonomous_daily_plan()
             self.assertEqual(probe.llm_calls, 1)
@@ -607,6 +653,38 @@ class AsyncRegressionTests(unittest.IsolatedAsyncioTestCase):
             FrozenDateTime.current = datetime(2026, 8, 20, 8, 21, 0)
             await probe._ensure_autonomous_daily_plan()
             self.assertEqual(probe.llm_calls, 2)
+
+    async def test_failed_daily_plan_default_allows_two_retries(self):
+        """Issue #34: one unlucky model response must not kill the whole day."""
+        class FrozenDateTime(datetime):
+            current = datetime(2026, 8, 20, 8, 5, 0)
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current
+
+        probe = FailingPlanProbe()
+        with patch("core.schedule_mixin.datetime", FrozenDateTime):
+            first = await probe._ensure_autonomous_daily_plan()
+            self.assertEqual(first["model_attempts"], 1)
+            self.assertFalse(first["retry_exhausted"])
+
+            FrozenDateTime.current = datetime(2026, 8, 20, 8, 20, 0)
+            second = await probe._ensure_autonomous_daily_plan()
+            self.assertEqual(probe.llm_calls, 2)
+            self.assertEqual(second["model_attempts"], 2)
+            # 默认允许 2 次重试（共 3 次尝试），第二次失败仍不判死刑
+            self.assertFalse(second["retry_exhausted"])
+
+            FrozenDateTime.current = datetime(2026, 8, 20, 8, 35, 0)
+            third = await probe._ensure_autonomous_daily_plan()
+            self.assertEqual(probe.llm_calls, 3)
+            self.assertEqual(third["model_attempts"], 3)
+            self.assertTrue(third["retry_exhausted"])
+
+            FrozenDateTime.current = datetime(2026, 8, 20, 8, 50, 0)
+            await probe._ensure_autonomous_daily_plan()
+            self.assertEqual(probe.llm_calls, 3)
 
     async def test_failed_plan_does_not_invent_proactive_or_dynamic_actions(self):
         probe = FailingPlanProbe()
@@ -767,6 +845,88 @@ class AsyncRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(probe.analysis_calls, 1)
 
 
+class ProactiveDiscoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_search_uses_all_directions_and_interleaves_without_seen_videos(self):
+        probe = ProactiveProbe({})
+        calls = []
+
+        async def search(query, ps):
+            calls.append(query)
+            return [{"bvid": "seen"}, {"bvid": "shared"}] + [
+                {"bvid": f"{query}-{i}", "title": query} for i in range(ps)
+            ]
+
+        probe.search_bilibili_videos = search
+        with patch("core.proactive.asyncio.sleep", new=AsyncMock()):
+            result = await probe._get_proactive_search_videos(
+                ["one", "two", "three"], 6, watched_bvids={"seen"},
+            )
+        self.assertEqual(calls, ["one", "two", "three"])
+        self.assertEqual([v["_search_keyword"] for v in result[:3]], calls)
+        self.assertEqual(len(result), 6)
+        self.assertEqual(len({v["bvid"] for v in result}), 6)
+        self.assertNotIn("seen", {v["bvid"] for v in result})
+
+    async def test_failed_direction_does_not_discard_other_search_results(self):
+        probe = ProactiveProbe({})
+        probe.search_bilibili_videos = AsyncMock(side_effect=[
+            RuntimeError("offline"), [{"bvid": "valid"}], [],
+        ])
+        with patch("core.proactive.asyncio.sleep", new=AsyncMock()):
+            result = await probe._get_proactive_search_videos(["one", "two", "three"], 3)
+        self.assertEqual([v["bvid"] for v in result], ["valid"])
+        self.assertEqual(probe.search_bilibili_videos.await_count, 3)
+
+    async def test_exploration_survives_prefilter_and_full_persona_is_not_used_for_search(self):
+        probe = ProactiveProbe({"ENABLE_PROACTIVE_LLM_PREFILTER": True})
+        probe._load_json = lambda _path, default: default
+        probe._get_system_prompt = AsyncMock(return_value="只喜欢深海的角色")
+        probe._llm_call = AsyncMock(return_value='["数学悖论", "冷门语言学"]')
+        queries = await probe._decide_proactive_search_queries([])
+        self.assertEqual(len(queries), 3)
+        probe._get_system_prompt.assert_not_awaited()
+        self.assertEqual(probe._llm_call.await_count, 1)
+        allow, _ = await probe._should_watch_video_before_download(
+            {"_exploration": True, "title": "陌生题材"}, [], 0, 3,
+        )
+        self.assertTrue(allow)
+        self.assertEqual(probe._llm_call.await_count, 1)
+
+    async def test_share_uses_personal_score_and_keeps_delivery_limits(self):
+        probe = ProactiveProbe({
+            "RECOMMEND_OWNER_MIN_SCORE": 8, "RECOMMEND_OWNER_DAILY_LIMIT": 1,
+        })
+        evaluation = {"recommend_owner": True, "recommend_reason": "这段玩法让我笑了半天"}
+        self.assertTrue(probe._can_recommend_owner(evaluation, 9, 0))
+        self.assertFalse(probe._can_recommend_owner(evaluation, 9, 1))
+        probe.config["ENABLE_OWNER_RECOMMEND"] = False
+        self.assertFalse(probe._can_recommend_owner(evaluation, 10, 0))
+        probe.config["ENABLE_OWNER_RECOMMEND"] = True
+        for score in (0, 6, 7, True, "9", float("nan"), float("inf")):
+            self.assertFalse(probe._can_recommend_owner(evaluation, score, 0))
+        self.assertFalse(probe._can_recommend_owner(dict(evaluation, recommend_owner=False), 10, 0))
+        self.assertFalse(probe._can_recommend_owner(dict(evaluation, recommend_reason=""), 10, 0))
+
+    async def test_self_enjoyment_can_share_without_owner_interest_evidence(self):
+        probe = ProactiveProbe({})
+        probe._get_system_prompt = AsyncMock(return_value="测试人设")
+        probe._load_json = lambda _path, default: default
+        probe._get_today_mood = lambda: ("平静", "")
+        probe._owner_recommendation_context = AsyncMock(return_value="")
+        probe._llm_call = AsyncMock(return_value=json.dumps({
+            "score": 9, "score_reason": "实拍机关很巧妙", "comment": "", "mood": "震撼",
+            "review": "没想到是用这种机关拍的", "want_follow": False,
+            "recommend_owner": True,
+            "recommend_reason": "实拍机关的做法让我很想分享", "partition": "影视",
+            "preference_signals": [], "search_keywords": [],
+        }, ensure_ascii=False))
+        result = await probe._evaluate_video({"title": "实拍幕后"}, "机关演示")
+        self.assertEqual(result["score"], 9)
+        self.assertTrue(result["recommend_owner"])
+        self.assertEqual(result["recommend_reason"], "实拍机关的做法让我很想分享")
+        self.assertTrue(probe._can_recommend_owner(result, result["score"], 0))
+
+
 class AutonomousRangeTests(unittest.TestCase):
     test_autonomous_range_honors_new_minimum_and_maximum = staticmethod(_check_autonomous_range_honors_new_minimum_and_maximum)
     test_autonomous_range_migrates_custom_legacy_limit_when_new_max_is_default = staticmethod(_check_autonomous_range_migrates_custom_legacy_limit_when_new_max_is_default)
@@ -781,7 +941,9 @@ class AutonomousRangeTests(unittest.TestCase):
     test_autonomous_range_preserves_explicit_legacy_zero = staticmethod(_check_autonomous_range_preserves_explicit_legacy_zero)
     test_bili_private_tool_ceiling_rejects_parse_video_even_from_old_allowlist = staticmethod(_check_bili_private_tool_ceiling_rejects_parse_video_even_from_old_allowlist)
     test_config_schema_has_no_duplicate_keys = staticmethod(_check_config_schema_has_no_duplicate_keys)
+    test_interaction_ad_filter_handles_plus_and_invalid_patterns = staticmethod(_check_interaction_ad_filter_handles_plus_and_invalid_patterns)
     test_video_format_fallbacks_include_portrait_short_side = staticmethod(_check_video_format_fallbacks_include_portrait_short_side)
+    test_video_download_uses_short_timeout_for_each_format = staticmethod(_check_video_download_uses_short_timeout_for_each_format)
     test_video_cache_uses_detail_long_term_and_faded_stages = staticmethod(_check_video_cache_uses_detail_long_term_and_faded_stages)
     test_concrete_preference_signals_feed_search_fallback = staticmethod(_check_concrete_preference_signals_feed_search_fallback)
     test_interest_report_separates_samples_and_persisted_preferences = staticmethod(_check_interest_report_separates_samples_and_persisted_preferences)
