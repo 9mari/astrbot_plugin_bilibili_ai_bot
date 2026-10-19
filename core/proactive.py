@@ -1240,22 +1240,55 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
             "关闭": "off",
         }
         value = aliases.get(value, value)
-        return value if value in {"private_message", "comment", "both", "qq_private", "bili_private_and_qq", "all", "off"} else "private_message"
+        return value if value in {"private_message", "comment", "both", "qq_private", "qq_group", "qq_both", "bili_private_and_qq", "all", "off"} else "private_message"
 
-    async def _send_owner_recommend_qq(self, text, bvid):
-        umo = str(self.config.get("OWNER_QQ_UMO", "") or "").strip()
-        if not umo:
-            logger.warning("[BiliBot] 跳过 QQ 推荐：未配置 OWNER_QQ_UMO")
+    async def _send_owner_recommend_qq(self, text, bvid, *, group=False):
+        key = "OWNER_QQ_GROUP_UMO" if group else "OWNER_QQ_UMO"
+        umo = str(self.config.get(key, "") or "").strip()
+        parts = umo.split(":", 2)
+        expected_type = "GroupMessage" if group else "FriendMessage"
+        if len(parts) != 3 or not parts[0] or parts[1] != expected_type or not parts[2]:
+            logger.warning(f"[BiliBot] 跳过 QQ 推荐：{key} 需配置正确的 {expected_type} 会话 UMO")
             return False
         try:
             from astrbot.api.event import MessageChain
+            chain = MessageChain()
+            if group:
+                from astrbot.api.message_components import At
+                owner_qq = str(self.config.get("OWNER_QQ_ID", "") or "").strip()
+                if not re.fullmatch(r"[1-9][0-9]{4,19}", owner_qq):
+                    logger.warning("[BiliBot] 跳过 QQ 群推荐：请在 OWNER_QQ_ID 填写要 @ 的主人 QQ 号")
+                    return False
+                chain.chain.append(At(qq=owner_qq))
             message = f"{text}\nhttps://www.bilibili.com/video/{bvid}"
-            await self.context.send_message(umo, MessageChain().message(message))
-            logger.info(f"[BiliBot] ✉️ 已通过 QQ 私信给主人分享：{bvid}")
+            result = await self.context.send_message(umo, chain.message(message))
+            if result is False:
+                logger.warning(f"[BiliBot] QQ 推荐发送失败：{key} 未找到可发送的平台")
+                return False
+            logger.info(f"[BiliBot] 已通过 QQ {'群聊@' if group else '私信'}给主人分享：{bvid}")
             return True
         except Exception as exc:
             logger.warning(f"[BiliBot] QQ 推荐发送失败: {exc}")
             return False
+
+    async def _deliver_owner_recommend_qq(self, delivery, text, bvid):
+        actions = []
+        targets = []
+        if delivery in {"qq_private", "qq_both", "bili_private_and_qq", "all"}:
+            targets.append((False, "qq_private", "💬QQ推荐给主人"))
+        if delivery in {"qq_group", "qq_both", "all"}:
+            targets.append((True, "qq_group", "📢QQ群推荐给主人"))
+        for group, channel, label in targets:
+            outcome = await self._execute_proactive_action(
+                f"proactive_owner_{'qq_group' if group else 'qq'}:{bvid}",
+                "proactive_owner_recommend",
+                bvid,
+                lambda group=group: self._send_owner_recommend_qq(text, bvid, group=group),
+                metadata={"channel": channel},
+            )
+            if outcome.success:
+                actions.append(label)
+        return actions
 
     @staticmethod
     def _is_owner_recommend_action(action):
@@ -1673,8 +1706,10 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                                 "comment": "在视频评论区@对方",
                                 "both": "通过B站私信分享，并在视频评论区@对方",
                                 "qq_private": "通过QQ私信把链接分享给对方",
+                                "qq_group": "在QQ群里分享链接并@对方（群成员可见，不透露私聊内容）",
+                                "qq_both": "通过QQ私信和QQ群分享链接，群里@对方（群成员可见，不透露私聊内容）",
                                 "bili_private_and_qq": "通过B站私信和QQ私信分享",
-                                "all": "通过B站私信、QQ私信分享，并在视频评论区@对方",
+                                "all": "通过B站私信、QQ私信和QQ群分享，并在视频评论区和QQ群@对方（不透露私聊内容）",
                             }.get(delivery, "通过B站私信把链接分享给对方")
                             rec_prompt = f"""你刚看完一个B站视频，自己发现了值得分享的具体点，想告诉{on}。现在要{delivery_scene}，请写一句自然的随手分享，不必假定对方也有相同爱好。
 
@@ -1757,18 +1792,9 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                                     logger.warning(
                                         "[BiliBot] 跳过评论区推荐：未配置 OWNER_BILI_NAME"
                                     )
-                            if delivery in {"qq_private", "bili_private_and_qq", "all"}:
-                                if (
-                                    await self._execute_proactive_action(
-                                        f"proactive_owner_qq:{bvid}",
-                                        "proactive_owner_recommend",
-                                        bvid,
-                                        lambda: self._send_owner_recommend_qq(rec_text, bvid),
-                                        metadata={"channel": "qq_private"},
-                                    )
-                                ).success:
-                                    actions.append("💬QQ推荐给主人")
-                                    sent_owner_recommend = True
+                            qq_actions = await self._deliver_owner_recommend_qq(delivery, rec_text, bvid)
+                            actions.extend(qq_actions)
+                            sent_owner_recommend = sent_owner_recommend or bool(qq_actions)
                             if sent_owner_recommend:
                                 owner_recommend_count += 1
                                 self._owner_last_recommended_at = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -1810,7 +1836,8 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                 for action in actions
             )
             recommended_by_qq = "💬QQ推荐给主人" in actions
-            recommended_owner = recommended_by_private_message or recommended_by_comment or recommended_by_qq
+            recommended_by_qq_group = "📢QQ群推荐给主人" in actions
+            recommended_owner = recommended_by_private_message or recommended_by_comment or recommended_by_qq or recommended_by_qq_group
             on = self.config.get("OWNER_NAME", "") or "主人"
             memory_text = (
                 f"[{log_entry['time']}] Bot看了视频《{video.get('title', '')}》"
@@ -1832,6 +1859,8 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                     channels.append("B站私信")
                 if recommended_by_qq:
                     channels.append("QQ私信")
+                if recommended_by_qq_group:
+                    channels.append("QQ群@对方")
                 if recommended_by_comment:
                     channels.append("视频评论区@对方")
                 memory_text += f" | 觉得不错，已通过{'、'.join(channels)}分享给{on}"

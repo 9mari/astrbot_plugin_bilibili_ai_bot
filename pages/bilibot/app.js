@@ -202,7 +202,7 @@ const MOCK_FIELDS = {
   PROACTIVE_LLM_PREFILTER_MAX_REJECTS: ["【主动看片·筛选】预筛选最多拒绝次数", "int", 4],
   CUSTOM_PROACTIVE_INSTRUCTION: ["【主动行为】主动评论补充提示词", "text", "只在确实有内容可说时评论，保持自然。"],
   ENABLE_OWNER_RECOMMEND: ["【给主人分享】启用给主人分享", "bool", true],
-  RECOMMEND_OWNER_DELIVERY: ["【给主人分享】分享方式", "string", "private_message", ["private_message", "comment", "both"]],
+  RECOMMEND_OWNER_DELIVERY: ["【给主人分享】分享方式", "string", "private_message", ["private_message", "comment", "both", "qq_private", "qq_group", "qq_both", "bili_private_and_qq", "all"]],
   RECOMMEND_OWNER_MIN_SCORE: ["【给主人分享】最低个人喜好评分", "int", 7],
   RECOMMEND_OWNER_DAILY_LIMIT: ["【给主人分享】每日最多分享次数", "int", 3],
   CUSTOM_RECOMMEND_INSTRUCTION: ["【给主人分享】分享补充提示词", "text", "说明为什么觉得主人会喜欢，不要只发链接。"],
@@ -920,6 +920,8 @@ const OPTION_LABELS = {
     comment: "评论区 @主人",
     both: "B站私信 + 评论区 @",
     qq_private: "QQ 私信分享",
+    qq_group: "QQ群分享并 @主人",
+    qq_both: "QQ 私聊 + 群聊 @主人",
     bili_private_and_qq: "B站私信 + QQ 私信",
     all: "B站 + QQ 全部通道",
     off: "关闭分享方式",
@@ -1483,7 +1485,7 @@ const AUTONOMY_CAPABILITIES = [
   { id: "special-follow", title: "特别关注", icon: "star", toggle: "SPECIAL_FOLLOW_ENABLED", description: "巡视特别关注用户；不在此处重复设置固定时刻或触发次数。", keys: [] },
   { id: "bangumi", title: "番剧日程", icon: "video", toggle: "ENABLE_BANGUMI", description: "番剧是独立日程，不并入主动浏览；需同时开启番剧功能与主动追番，才会在计划和事件环中出现。", keys: ["BANGUMI_PROACTIVE", "BANGUMI_POOLS", "BANGUMI_EPISODE_COUNT", "BANGUMI_CONTINUE_SCORE", "BANGUMI_DAILY_LIMIT", "BANGUMI_COMMENT", "BANGUMI_AUTO_FOLLOW"] },
   { id: "prefilter", title: "内容挑选", icon: "search", toggle: "ENABLE_PROACTIVE_LLM_PREFILTER", description: "用关注源、兴趣提示词和模型预筛选决定今天值得看的内容。", dependency: "依赖主动浏览", keys: ["PROACTIVE_FOLLOW_UIDS", "PROACTIVE_SEARCH_QUERY_PROMPT", "PROACTIVE_TASTE_WINDOW_DAYS", "PROACTIVE_PREFERENCE_HALF_LIFE_DAYS", "PROACTIVE_EXPLORATION_RATIO", "PROACTIVE_VIDEO_POOLS", "PROACTIVE_LLM_PREFILTER_MAX_REJECTS", "CUSTOM_PROACTIVE_INSTRUCTION"] },
-  { id: "owner-share", title: "给主人分享", icon: "heart", toggle: "ENABLE_OWNER_RECOMMEND", description: "统一管理给主人推荐与 QQ 当前活动同步；活动状态任务结束后立即清除，不写入长期记忆。", dependency: "依赖主动浏览", keys: ["RECOMMEND_OWNER_DELIVERY", "OWNER_QQ_UMO", "ENABLE_CROSS_PLATFORM_ACTIVITY_STATUS", "RECOMMEND_OWNER_MIN_SCORE", "RECOMMEND_OWNER_DAILY_LIMIT", "RECOMMEND_OWNER_MIN_GAP_MINUTES", "CUSTOM_RECOMMEND_INSTRUCTION"] },
+  { id: "owner-share", title: "给主人分享", icon: "heart", toggle: "ENABLE_OWNER_RECOMMEND", description: "统一管理给主人推荐与 QQ 当前活动同步；活动状态任务结束后立即清除，不写入长期记忆。", dependency: "依赖主动浏览", keys: ["RECOMMEND_OWNER_DELIVERY", "OWNER_QQ_UMO", "OWNER_QQ_GROUP_UMO", "OWNER_QQ_ID", "ENABLE_CROSS_PLATFORM_ACTIVITY_STATUS", "RECOMMEND_OWNER_MIN_SCORE", "RECOMMEND_OWNER_DAILY_LIMIT", "RECOMMEND_OWNER_MIN_GAP_MINUTES", "CUSTOM_RECOMMEND_INSTRUCTION"] },
 ];
 
 

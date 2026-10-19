@@ -562,6 +562,11 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
             "private_message": "B站私信",
             "comment": "评论区@",
             "both": "私信+评论区",
+            "qq_private": "QQ私聊",
+            "qq_group": "QQ群@主人",
+            "qq_both": "QQ私聊+QQ群@主人",
+            "bili_private_and_qq": "B站私信+QQ私聊",
+            "all": "B站+QQ全部通道（含QQ群@）",
             "off": "关闭",
         }.get(self._owner_recommend_delivery(), "B站私信")
         private_scope = {
@@ -1509,7 +1514,7 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("biliUMO")
     async def cmd_umo(self, event: AstrMessageEvent):
-        """获取当前会话 UMO 并自动记录到周总结/恶意告警配置。"""
+        """获取当前会话 UMO，区分主人私聊与群推荐目标。"""
         umo = event.unified_msg_origin
         saved = []
         if not (self.config.get("ABUSE_ALERT_QQ_UMO", "") or "").strip():
@@ -1518,14 +1523,23 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
         if not (self.config.get("WEEKLY_SUMMARY_QQ_UMO", "") or "").strip():
             self.config["WEEKLY_SUMMARY_QQ_UMO"] = umo
             saved.append("周总结")
-        if not (self.config.get("OWNER_QQ_UMO", "") or "").strip():
-            self.config["OWNER_QQ_UMO"] = umo
-            saved.append("主人跨端活动/分享")
+        scene = str(umo).split(":", 2)
+        if len(scene) == 3 and scene[1] in {"FriendMessage", "GroupMessage"}:
+            is_group = scene[1] == "GroupMessage"
+            key = "OWNER_QQ_GROUP_UMO" if is_group else "OWNER_QQ_UMO"
+            if not (self.config.get(key, "") or "").strip():
+                self.config[key] = umo
+                saved.append("QQ群视频推荐" if is_group else "主人跨端活动/私聊分享")
+            if not is_group and not str(self.config.get("OWNER_QQ_ID", "") or "").strip():
+                sender = str(event.get_sender_id() or "")
+                if sender.isascii() and sender.isdigit() and 5 <= len(sender) <= 20 and not sender.startswith("0"):
+                    self.config["OWNER_QQ_ID"] = sender
+                    saved.append("群推荐@的主人QQ号")
         if saved:
             self.config.save_config()
             yield event.plain_result(f"当前 UMO：{umo}\n✅ 已自动填入：{'、'.join(saved)}的 QQ UMO 配置")
         else:
-            yield event.plain_result(f"当前 UMO：{umo}\n（恶意告警和周总结的 UMO 都已有值，未覆盖）")
+            yield event.plain_result(f"当前 UMO：{umo}\n（适用配置已有值或当前会话类型不支持推荐绑定，未覆盖）")
 
     @filter.command("bili帮助")
     async def cmd_help(self, event: AstrMessageEvent):

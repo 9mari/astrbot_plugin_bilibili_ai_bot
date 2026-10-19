@@ -51,6 +51,18 @@
     "default": "",
     "hint": "用于当前活动同步和 QQ 推荐分享；在主人 QQ 私聊中执行 /biliUMO 可取得该值。"
   },
+  "OWNER_QQ_GROUP_UMO": {
+    "description": "【跨端活动与分享】视频推荐目标 QQ 群 UMO",
+    "type": "string",
+    "default": "",
+    "hint": "在目标 QQ 群执行 /biliUMO 获取并自动填入（已有值不覆盖）。选择 qq_group、qq_both 或 all 时向此群推送。"
+  },
+  "OWNER_QQ_ID": {
+    "description": "【跨端活动与分享】群推荐时要 @ 的主人 QQ 号",
+    "type": "string",
+    "default": "",
+    "hint": "填写个人 QQ 号码，不是群号或B站UID；群推荐必须配置。可在主人 QQ 私聊执行 /biliUMO 自动填入空值。"
+  },
   "PROXY_URL": {
     "description": "【网络代理】插件自定义代理地址（可选）",
     "type": "string",
@@ -703,7 +715,7 @@
     "description": "【主动行为·给主人推荐】启用给主人分享",
     "type": "bool",
     "default": true,
-    "hint": "关闭后不会向主人发送私信或评论区推荐；分享方式由下方选项决定。"
+    "hint": "关闭后不会发送任何主动视频推荐（含B站、QQ私聊和QQ群）；分享方式由下方选项决定。"
   },
   "RECOMMEND_OWNER_DELIVERY": {
     "description": "【主动行为·给主人推荐】发送方式（B站 / QQ）",
@@ -714,10 +726,12 @@
       "comment",
       "both",
       "qq_private",
+      "qq_group",
+      "qq_both",
       "bili_private_and_qq",
       "all"
     ],
-    "hint": "private_message=B站私信；comment=评论区@主人；both=B站两种都发；qq_private=QQ私信；bili_private_and_qq=B站私信+QQ；all=全部通道。QQ 使用 OWNER_QQ_UMO。"
+    "hint": "private_message=B站私信；comment=评论区@主人；both=B站两种都发；qq_private=QQ私聊；qq_group=QQ群@主人；qq_both=QQ私聊+群@；bili_private_and_qq=B站私信+QQ私聊；all=全部通道（含QQ群）。私聊填 OWNER_QQ_UMO，群聊填 OWNER_QQ_GROUP_UMO 和 OWNER_QQ_ID。"
   },
   "RECOMMEND_OWNER_MIN_SCORE": {
     "description": "【主动行为·给主人推荐】最低个人喜好评分",

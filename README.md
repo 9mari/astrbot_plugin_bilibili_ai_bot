@@ -316,7 +316,7 @@ git clone https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot
 |`/bili日志 番剧`  |查看番剧记录                 |
 |`/bili周总结`     |手动生成本周B站生活总结，并渲染图片卡片 |
 |`/bili联动`       |查看统一记忆接口、用户画像和直播记忆状态       |
-|`/biliUMO`     |获取当前会话 UMO 并自动填入配置     |
+|`/biliUMO`     |获取当前会话 UMO，区分私聊和群聊并自动填入空配置     |
 
 日志统一走 `/bili日志 <视频|番剧|动态|回复> [日期]`，例如 `/bili日志 视频 2026-07-01`。
 
@@ -399,3 +399,19 @@ git clone https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot
 ## 📄 License
 
 MIT
+
+
+### 感兴趣的视频推送到 QQ
+
+主动浏览看完视频后，Bot 会根据自己的评分、具体看点及分享意愿决定是否推荐。推送包含推荐语和B站视频链接；群聊会使用真正的 @ 消息提醒主人，不会自动上传视频文件。
+
+1. 用 AstrBot 管理员账号，在主人与机器人的 **QQ 私聊**执行 `/biliUMO`，自动填入空的 `OWNER_QQ_UMO` 和 `OWNER_QQ_ID`。
+2. 在目标 **QQ 群**执行 `/biliUMO`，自动填入空的 `OWNER_QQ_GROUP_UMO`。检查 `OWNER_QQ_ID` 是要被 @ 的个人 QQ 号。已有值不会覆盖；切换目标请在配置面板修改。
+3. 在 WebUI「给主人分享」或插件配置开启 `ENABLE_OWNER_RECOMMEND`，将 `RECOMMEND_OWNER_DELIVERY` 设为：
+   - `qq_private`：仅 QQ 私聊。
+   - `qq_group`：仅 QQ 群推送并 @ 主人。
+   - `qq_both`：同时发 QQ 私聊和 QQ 群并 @ 主人。
+   - `all`：B站私信、B站评论区、QQ 私聊和 QQ 群全部通道。
+4. 保存配置并重载插件。开启主动浏览，也可用 `/bili主动` 触发一次观看；达到评分门槛且模型愿意分享时才会推送。
+
+默认最低评分 7 分、每天最多推荐 3 个视频、推荐间隔 120 分钟，可在「给主人分享」调整。同一视频只推荐一次；任一通道成功即计入推荐记录，部分通道失败不会自动补发。机器人需已连接支持主动消息的 QQ 适配器，并能向目标好友/群发送消息。群 UMO 不可填入私聊配置；缺少有效的主人 QQ 号时会跳过群推送并记录原因。
