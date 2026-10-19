@@ -1242,7 +1242,7 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
         value = aliases.get(value, value)
         return value if value in {"private_message", "comment", "both", "qq_private", "qq_group", "qq_both", "bili_private_and_qq", "all", "off"} else "private_message"
 
-    async def _send_owner_recommend_qq(self, text, bvid, *, group=False):
+    async def _send_owner_recommend_qq(self, text, bvid, *, group=False, title=""):
         key = "OWNER_QQ_GROUP_UMO" if group else "OWNER_QQ_UMO"
         umo = str(self.config.get(key, "") or "").strip()
         parts = umo.split(":", 2)
@@ -1260,7 +1260,9 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                     logger.warning("[BiliBot] 跳过 QQ 群推荐：请在 OWNER_QQ_ID 填写要 @ 的主人 QQ 号")
                     return False
                 chain.chain.append(At(qq=owner_qq))
-            message = f"{text}\nhttps://www.bilibili.com/video/{bvid}"
+            title = str(title or "").strip()
+            title_line = f"《{title}》\n" if title else ""
+            message = f"{text}\n{title_line}https://www.bilibili.com/video/{bvid}"
             result = await self.context.send_message(umo, chain.message(message))
             if result is False:
                 logger.warning(f"[BiliBot] QQ 推荐发送失败：{key} 未找到可发送的平台")
@@ -1271,7 +1273,7 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
             logger.warning(f"[BiliBot] QQ 推荐发送失败: {exc}")
             return False
 
-    async def _deliver_owner_recommend_qq(self, delivery, text, bvid):
+    async def _deliver_owner_recommend_qq(self, delivery, text, bvid, *, title=""):
         actions = []
         targets = []
         if delivery in {"qq_private", "qq_both", "bili_private_and_qq", "all"}:
@@ -1283,7 +1285,7 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                 f"proactive_owner_{'qq_group' if group else 'qq'}:{bvid}",
                 "proactive_owner_recommend",
                 bvid,
-                lambda group=group: self._send_owner_recommend_qq(text, bvid, group=group),
+                lambda group=group: self._send_owner_recommend_qq(text, bvid, group=group, title=title),
                 metadata={"channel": channel},
             )
             if outcome.success:
@@ -1730,7 +1732,7 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                         "bili_private_and_qq": "通过B站私信和QQ私信分享",
                         "all": "通过B站私信、QQ私信和QQ群分享，并在视频评论区和QQ群@对方（不透露私聊内容）",
                     }.get(delivery, "通过B站私信把链接分享给对方")
-                    rec_prompt = f"""你刚看完一个B站视频，自己发现了值得分享的具体点，想告诉{on}。现在要{delivery_scene}，请写一句自然的随手分享，不必假定对方也有相同爱好。
+                    rec_prompt = f"""你刚看完一个B站视频，自己发现了值得分享的具体点，想告诉{on}。现在要{delivery_scene}，请像主动给主人发现了有趣视频那样，亲近自然地邀请对方一起看。
 
 视频信息：
 - 标题：「{video.get('title', '')}」
@@ -1740,15 +1742,15 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
 {('- 对方画像与相关记忆（只使用其中明确的信息）：' + owner_interest) if owner_interest else ''}
 
 只写推荐时附带的那句话。要求：
-- 优先提一个自己真的看完后在意的具体点；有可靠兴趣线索时再轻轻带出为什么想到对方，不必每次直说“想到你”
-- 没有可靠兴趣线索就只说自己的真实感受，像熟人顺手丢来一个东西，不假装了解对方
+- 默认以邀请对方的语气开头，接一句具体看点，表达想给主人看或想和主人一起看的心意；补充提示词可调整称呼和语气
+- 重点是邀请主人观看和说明值得看的地方；感想只作简短补充，不要整句都在独自抒情。没有可靠兴趣线索时也可以邀请一起看
 - 自己的爱好不是对方的爱好。没有对方明确反馈，不能因自己喜欢或以前分享过就写“你肯定喜欢”
-- 不照搬“推荐理由”字段，不总结整部视频，不写“我为你找到了”或“给你推荐一个”
+- 不照搬“推荐理由”字段，不总结整部视频。可以说“想给你看这个”；只有确实按主人需求搜索过，才能说“专门为你找到”
 - 私信语气可以更松一点；评论区语气要让路人看到也能理解，不暴露私下记忆
-- 禁止“快来看”“超好看”“强烈推荐”“不看后悔”“墙裂安利”等催促和营销腔
+- 可以自然邀请“看这个视频”，避免“强烈推荐”“不看后悔”“墙裂安利”等营销腔，不催促回应
 - 不复述完整标题，不要堆感叹号、连续撒娇或以问题句催对方回应
-- 12-42字，通常一句，说完自然收住
-- 不要带@符号、不要带人名或称呼（系统会按发送方式处理）
+- 20-60字，一到两句，说完自然收住
+- 不要带@符号；保留“主人”等自然称呼，系统另行处理群聊和评论区的@
 - 写不自然、没有具体看点或这一刻并不想分享时，可以放弃；缺少对方的兴趣记录不影响自然分享
 {RECOMMENDATION_SCHEMA_PROMPT}"""
                     custom_rec_inst = self.config.get("CUSTOM_RECOMMEND_INSTRUCTION", "")
@@ -1763,10 +1765,7 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                     if rec_result["decision"] != "share":
                         raise ContentProtocolError("recommendation_skipped")
                     rec_text = re.sub(r'@\S+\s*', '', rec_result["text"])
-                    rec_text = re.sub(r'[\r\n]+', ' ', rec_text).strip(' "“”\'')[:48]
-                    owner_name = (self.config.get("OWNER_NAME", "") or "").strip()
-                    _name_patterns = ["主人", "亲爱的"] + ([re.escape(owner_name)] if owner_name else [])
-                    rec_text = re.sub(rf'^({"|".join(_name_patterns)})[，,\s]*', '', rec_text)
+                    rec_text = re.sub(r'[\r\n]+', ' ', rec_text).strip(' "“”\'')[:80]
                     sent_owner_recommend = False
                     if oid and not interaction_failed and delivery in {"private_message", "both", "bili_private_and_qq", "all"}:
                         if owner_mid:
@@ -1811,7 +1810,10 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                             logger.warning(
                                 "[BiliBot] 跳过评论区推荐：未配置 OWNER_BILI_NAME"
                             )
-                    qq_actions = await self._deliver_owner_recommend_qq(delivery, rec_text, bvid)
+                    qq_actions = await self._deliver_owner_recommend_qq(
+                        delivery, rec_text, bvid,
+                        title=analysis_info.get("title") or video.get("title", ""),
+                    )
                     actions.extend(qq_actions)
                     sent_owner_recommend = sent_owner_recommend or bool(qq_actions)
                     if sent_owner_recommend:
