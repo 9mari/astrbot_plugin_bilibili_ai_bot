@@ -1354,6 +1354,8 @@ class BiliBiliBot(Star, UtilsMixin, LLMMixin, VisionMixin, MemoryMixin, Affectio
                 else:
                     lines.append(f"     UP:{w.get('up_name','?')} | {score}分 | {w.get('mood','?')}")
                 if w.get("review"): lines.append(f"     📝 {w['review'][:60]}")
+                if w.get("recommend_skip_reason"):
+                    lines.append(f"     ✉️ 未推荐：{w['recommend_skip_reason']}")
                 lines.append(f"     {actions}")
         if today_comment:
             lines.append(f"\n💬 发了 {len(today_comment)} 条评论：")

@@ -1288,6 +1288,11 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
             )
             if outcome.success:
                 actions.append(label)
+            else:
+                logger.warning(
+                    f"[BiliBot] {channel} 推荐未送达 {bvid}: "
+                    f"{getattr(outcome, 'reason', '') or '发送失败，请检查目标 UMO 和适配器'}"
+                )
         return actions
 
     @staticmethod
@@ -1318,15 +1323,19 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
         return ledger, count
 
     def _can_recommend_owner(self, evaluation, score, recommended_today):
+        return not self._owner_recommend_skip_reason(evaluation, score, recommended_today)
+
+    def _owner_recommend_skip_reason(self, evaluation, score, recommended_today):
+        """Explain a normal recommendation skip without bypassing interest or quotas."""
         if self._owner_recommend_delivery() == "off":
-            return False
+            return "主人推荐已关闭"
         if not evaluation.get("recommend_owner", False):
-            return False
+            return "模型本次没有分享意愿（recommend_owner=false）"
         try:
             gap = max(0, int(self.config.get("RECOMMEND_OWNER_MIN_GAP_MINUTES", 120)))
             last = getattr(self, "_owner_last_recommended_at", "")
             if gap and last and (datetime.now() - datetime.strptime(last, "%Y-%m-%d %H:%M")).total_seconds() < gap * 60:
-                return False
+                return f"尚未达到推荐间隔 {gap} 分钟（上次：{last}）"
         except (TypeError, ValueError):
             pass
         try:
@@ -1335,15 +1344,19 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
             min_score = 7
         min_score = max(1, min(10, min_score))
         if isinstance(score, bool) or not isinstance(score, (int, float)):
-            return False
-        if not min_score <= score <= 10 or not str(evaluation.get("recommend_reason") or "").strip():
-            return False
+            return "视频评分无效"
+        if not min_score <= score <= 10:
+            return f"视频评分 {score} 未达到推荐要求 {min_score}–10 分"
+        if not str(evaluation.get("recommend_reason") or "").strip():
+            return "模型没有提供具体推荐理由"
         try:
             daily_limit = int(self.config.get("RECOMMEND_OWNER_DAILY_LIMIT", 3))
         except (TypeError, ValueError):
             daily_limit = 3
         daily_limit = max(0, daily_limit)
-        return not daily_limit or recommended_today < daily_limit
+        if daily_limit and recommended_today >= daily_limit:
+            return f"已达到每日推荐上限 {recommended_today}/{daily_limit}"
+        return ""
 
     # ── 触发判断 ──
     async def _should_trigger_proactive_from_text(self, text):
@@ -1633,7 +1646,7 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                 # 交互前快速校验 Cookie
                 cookie_ok, _ = await self.check_cookie()
                 if not cookie_ok:
-                    logger.warning("[BiliBot] ⚠️ Cookie 已失效，跳过本轮所有互动操作")
+                    logger.warning("[BiliBot] ⚠️ Cookie 检查未通过，跳过本轮B站互动（QQ推荐仍独立判断）")
                     interaction_failed = True
                 elif score >= self._proactive_score_threshold("PROACTIVE_LIKE_MIN_SCORE", 6) and self.config.get("PROACTIVE_LIKE", True):
                     if (
@@ -1691,27 +1704,33 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                             pl = self._load_json(PROACTIVE_LOG_FILE, [])
                             pl.append({"time": datetime.now().strftime("%Y-%m-%d %H:%M"), "bvid": bvid, "title": video.get("title", ""), "comment": proactive_comment})
                             self._save_json(PROACTIVE_LOG_FILE, pl[-100:])
-                    if bvid not in getattr(self, "_owner_recommended_bvids", set()) and self._can_recommend_owner(evaluation, score, owner_recommend_count):
-                        on = self.config.get("OWNER_NAME", "") or "主人"
-                        owner_mid = str(self.config.get("OWNER_MID", "") or "").strip()
-                        owner_bili = self.config.get("OWNER_BILI_NAME", "")
-                        delivery = self._owner_recommend_delivery()
-                        try:
-                            rec_reason = evaluation.get("recommend_reason", "")
-                            owner_interest = await self._owner_recommendation_context(
-                                f"{video.get('title', '')} {(video_description or '')[:500]}"
-                            )
-                            delivery_scene = {
-                                "private_message": "通过B站私信把链接分享给对方",
-                                "comment": "在视频评论区@对方",
-                                "both": "通过B站私信分享，并在视频评论区@对方",
-                                "qq_private": "通过QQ私信把链接分享给对方",
-                                "qq_group": "在QQ群里分享链接并@对方（群成员可见，不透露私聊内容）",
-                                "qq_both": "通过QQ私信和QQ群分享链接，群里@对方（群成员可见，不透露私聊内容）",
-                                "bili_private_and_qq": "通过B站私信和QQ私信分享",
-                                "all": "通过B站私信、QQ私信和QQ群分享，并在视频评论区和QQ群@对方（不透露私聊内容）",
-                            }.get(delivery, "通过B站私信把链接分享给对方")
-                            rec_prompt = f"""你刚看完一个B站视频，自己发现了值得分享的具体点，想告诉{on}。现在要{delivery_scene}，请写一句自然的随手分享，不必假定对方也有相同爱好。
+            # QQ 推荐不依赖 B站点赞、Cookie 复检或 aid 解析成功。
+            recommend_skip = self._owner_recommend_skip_reason(evaluation, score, owner_recommend_count)
+            if bvid in getattr(self, "_owner_recommended_bvids", set()):
+                recommend_skip = "该视频已经推荐过"
+            if recommend_skip:
+                logger.info(f"[BiliBot] 跳过主人推荐 {bvid}: {recommend_skip}")
+            else:
+                on = self.config.get("OWNER_NAME", "") or "主人"
+                owner_mid = str(self.config.get("OWNER_MID", "") or "").strip()
+                owner_bili = self.config.get("OWNER_BILI_NAME", "")
+                delivery = self._owner_recommend_delivery()
+                try:
+                    rec_reason = evaluation.get("recommend_reason", "")
+                    owner_interest = await self._owner_recommendation_context(
+                        f"{video.get('title', '')} {(video_description or '')[:500]}"
+                    )
+                    delivery_scene = {
+                        "private_message": "通过B站私信把链接分享给对方",
+                        "comment": "在视频评论区@对方",
+                        "both": "通过B站私信分享，并在视频评论区@对方",
+                        "qq_private": "通过QQ私信把链接分享给对方",
+                        "qq_group": "在QQ群里分享链接并@对方（群成员可见，不透露私聊内容）",
+                        "qq_both": "通过QQ私信和QQ群分享链接，群里@对方（群成员可见，不透露私聊内容）",
+                        "bili_private_and_qq": "通过B站私信和QQ私信分享",
+                        "all": "通过B站私信、QQ私信和QQ群分享，并在视频评论区和QQ群@对方（不透露私聊内容）",
+                    }.get(delivery, "通过B站私信把链接分享给对方")
+                    rec_prompt = f"""你刚看完一个B站视频，自己发现了值得分享的具体点，想告诉{on}。现在要{delivery_scene}，请写一句自然的随手分享，不必假定对方也有相同爱好。
 
 视频信息：
 - 标题：「{video.get('title', '')}」
@@ -1732,82 +1751,86 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
 - 不要带@符号、不要带人名或称呼（系统会按发送方式处理）
 - 写不自然、没有具体看点或这一刻并不想分享时，可以放弃；缺少对方的兴趣记录不影响自然分享
 {RECOMMENDATION_SCHEMA_PROMPT}"""
-                            custom_rec_inst = self.config.get("CUSTOM_RECOMMEND_INSTRUCTION", "")
-                            if custom_rec_inst:
-                                rec_prompt += f"\n【补充提示词】{custom_rec_inst}"
-                            rec_output = await getattr(self, "_generation_llm_call", self._llm_call)(rec_prompt, system_prompt=await self._get_system_prompt(), max_tokens=180)
-                            try:
-                                rec_result = parse_recommendation(rec_output)
-                            except ContentProtocolError as exc:
-                                logger.warning(f"[BiliBot] 主人推荐结构校验失败，放弃分享: {exc}")
-                                rec_result = {"decision": "skip", "text": ""}
-                            if rec_result["decision"] != "share":
-                                raise ContentProtocolError("recommendation_skipped")
-                            rec_text = re.sub(r'@\S+\s*', '', rec_result["text"])
-                            rec_text = re.sub(r'[\r\n]+', ' ', rec_text).strip(' "“”\'')[:48]
-                            owner_name = (self.config.get("OWNER_NAME", "") or "").strip()
-                            _name_patterns = ["主人", "亲爱的"] + ([re.escape(owner_name)] if owner_name else [])
-                            rec_text = re.sub(rf'^({"|".join(_name_patterns)})[，,\s]*', '', rec_text)
-                            sent_owner_recommend = False
-                            if delivery in {"private_message", "both", "bili_private_and_qq", "all"}:
-                                if owner_mid:
-                                    private_msg = (
-                                        f"{rec_text}\n"
-                                        f"https://www.bilibili.com/video/{bvid}"
-                                    )
-                                    if (
-                                        await self._execute_proactive_action(
-                                            f"proactive_owner_private:{bvid}",
-                                            "proactive_owner_recommend",
-                                            owner_mid,
-                                            lambda: self._send_bili_private_message(
-                                                owner_mid, private_msg
-                                            ),
-                                        )
-                                    ).success:
-                                        actions.append("✉️私信推荐给主人")
-                                        sent_owner_recommend = True
-                                        logger.info(
-                                            f"[BiliBot] ✉️ 已通过B站私信给主人分享：{bvid}"
-                                        )
-                                else:
-                                    logger.warning(
-                                        "[BiliBot] 跳过B站私信推荐：未配置 OWNER_MID"
-                                    )
-                            if delivery in {"comment", "both", "all"}:
-                                if owner_bili:
-                                    rec_msg = f"@{owner_bili} {rec_text}"
-                                    if (
-                                        await self._execute_proactive_action(
-                                            f"proactive_owner_comment:{bvid}",
-                                            "proactive_owner_recommend",
-                                            bvid,
-                                            lambda: self._send_comment(oid, rec_msg),
-                                        )
-                                    ).success:
-                                        actions.append("📢评论区推荐给主人")
-                                        sent_owner_recommend = True
-                                        logger.info(f"[BiliBot] 📢 已在评论区@主人：{rec_msg}")
-                                else:
-                                    logger.warning(
-                                        "[BiliBot] 跳过评论区推荐：未配置 OWNER_BILI_NAME"
-                                    )
-                            qq_actions = await self._deliver_owner_recommend_qq(delivery, rec_text, bvid)
-                            actions.extend(qq_actions)
-                            sent_owner_recommend = sent_owner_recommend or bool(qq_actions)
-                            if sent_owner_recommend:
-                                owner_recommend_count += 1
-                                self._owner_last_recommended_at = datetime.now().strftime("%Y-%m-%d %H:%M")
-                                self._owner_recommended_bvids.add(bvid)
-                                recommend_ledger[bvid] = {"time": self._owner_last_recommended_at, "title": video.get("title", "")}
-                                self._save_json(OWNER_RECOMMEND_LOG_FILE, recommend_ledger)
-                        except ContentProtocolError as e:
-                            if str(e) == "recommendation_skipped":
-                                logger.info("[BiliBot] 本次主人推荐选择不发送")
-                            else:
-                                logger.warning(f"[BiliBot] 主人推荐内容无效: {e}")
-                        except Exception as e:
-                            logger.warning(f"[BiliBot] 生成或发送主人推荐失败: {e}")
+                    custom_rec_inst = self.config.get("CUSTOM_RECOMMEND_INSTRUCTION", "")
+                    if custom_rec_inst:
+                        rec_prompt += f"\n【补充提示词】{custom_rec_inst}"
+                    rec_output = await getattr(self, "_generation_llm_call", self._llm_call)(rec_prompt, system_prompt=await self._get_system_prompt(), max_tokens=180)
+                    try:
+                        rec_result = parse_recommendation(rec_output)
+                    except ContentProtocolError as exc:
+                        logger.warning(f"[BiliBot] 主人推荐结构校验失败，放弃分享: {exc}")
+                        rec_result = {"decision": "skip", "text": ""}
+                    if rec_result["decision"] != "share":
+                        raise ContentProtocolError("recommendation_skipped")
+                    rec_text = re.sub(r'@\S+\s*', '', rec_result["text"])
+                    rec_text = re.sub(r'[\r\n]+', ' ', rec_text).strip(' "“”\'')[:48]
+                    owner_name = (self.config.get("OWNER_NAME", "") or "").strip()
+                    _name_patterns = ["主人", "亲爱的"] + ([re.escape(owner_name)] if owner_name else [])
+                    rec_text = re.sub(rf'^({"|".join(_name_patterns)})[，,\s]*', '', rec_text)
+                    sent_owner_recommend = False
+                    if oid and not interaction_failed and delivery in {"private_message", "both", "bili_private_and_qq", "all"}:
+                        if owner_mid:
+                            private_msg = (
+                                f"{rec_text}\n"
+                                f"https://www.bilibili.com/video/{bvid}"
+                            )
+                            if (
+                                await self._execute_proactive_action(
+                                    f"proactive_owner_private:{bvid}",
+                                    "proactive_owner_recommend",
+                                    owner_mid,
+                                    lambda: self._send_bili_private_message(
+                                        owner_mid, private_msg
+                                    ),
+                                )
+                            ).success:
+                                actions.append("✉️私信推荐给主人")
+                                sent_owner_recommend = True
+                                logger.info(
+                                    f"[BiliBot] ✉️ 已通过B站私信给主人分享：{bvid}"
+                                )
+                        else:
+                            logger.warning(
+                                "[BiliBot] 跳过B站私信推荐：未配置 OWNER_MID"
+                            )
+                    if oid and not interaction_failed and delivery in {"comment", "both", "all"}:
+                        if owner_bili:
+                            rec_msg = f"@{owner_bili} {rec_text}"
+                            if (
+                                await self._execute_proactive_action(
+                                    f"proactive_owner_comment:{bvid}",
+                                    "proactive_owner_recommend",
+                                    bvid,
+                                    lambda: self._send_comment(oid, rec_msg),
+                                )
+                            ).success:
+                                actions.append("📢评论区推荐给主人")
+                                sent_owner_recommend = True
+                                logger.info(f"[BiliBot] 📢 已在评论区@主人：{rec_msg}")
+                        else:
+                            logger.warning(
+                                "[BiliBot] 跳过评论区推荐：未配置 OWNER_BILI_NAME"
+                            )
+                    qq_actions = await self._deliver_owner_recommend_qq(delivery, rec_text, bvid)
+                    actions.extend(qq_actions)
+                    sent_owner_recommend = sent_owner_recommend or bool(qq_actions)
+                    if sent_owner_recommend:
+                        owner_recommend_count += 1
+                        self._owner_last_recommended_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        self._owner_recommended_bvids.add(bvid)
+                        recommend_ledger[bvid] = {"time": self._owner_last_recommended_at, "title": video.get("title", "")}
+                        self._save_json(OWNER_RECOMMEND_LOG_FILE, recommend_ledger)
+                    else:
+                        recommend_skip = "未成功发送，请检查推荐通道配置或发送日志"
+                except ContentProtocolError as e:
+                    recommend_skip = "模型选择本次不分享" if str(e) == "recommendation_skipped" else "推荐文案格式无效"
+                    if str(e) == "recommendation_skipped":
+                        logger.info("[BiliBot] 本次主人推荐选择不发送")
+                    else:
+                        logger.warning(f"[BiliBot] 主人推荐内容无效: {e}")
+                except Exception as e:
+                    recommend_skip = "推荐生成或发送异常，请检查运行日志"
+                    logger.warning(f"[BiliBot] 生成或发送主人推荐失败: {e}")
             if not interaction_failed and score >= self._proactive_score_threshold("PROACTIVE_FOLLOW_MIN_SCORE", 9) and self.config.get("PROACTIVE_FOLLOW", True):
                 if str(video.get("up_mid", "")) != str(self.config.get("OWNER_MID", "")):
                     if (
@@ -1824,6 +1847,7 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
             log_entry.update(
                 discovery_mode="explore" if video.get("_exploration") else "interest",
                 recommend_reason=evaluation.get("recommend_reason", ""),
+                recommend_skip_reason=recommend_skip,
                 recommended_at=getattr(self, "_owner_last_recommended_at", "") if any(self._is_owner_recommend_action(action) for action in actions) else "",
                 content_summary=self._clip_media_text(video_description, 360),
                 analysis_basis=analysis_info.get("analysis_basis", "legacy"),
